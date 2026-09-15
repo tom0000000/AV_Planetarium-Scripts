@@ -223,7 +223,8 @@ def normalization_scale(peak_amplitude, target_peak=127):
     return target_peak / peak_amplitude
 
 
-def palette_lut(palette, brightness_by_amplitude=False, amplitude_gamma=0.6, normalize_scale=1.0):
+def palette_lut(palette, brightness_by_amplitude=False, amplitude_gamma=0.6, normalize_scale=1.0,
+                 color_gamma=1.0):
     """Precomputes a 256x3 lookup table (byte value -> RGB) for the given
     palette, so colouring a whole array of bytes is one numpy fancy-index
     lookup instead of 256 x N per-pixel Python calls.
@@ -236,18 +237,38 @@ def palette_lut(palette, brightness_by_amplitude=False, amplitude_gamma=0.6, nor
     128 (which reads as mostly one colour, e.g. cyan/blue in the rainbow
     palette). 1.0 = no change, colours reflect raw byte values directly.
 
+    normalize_scale is a single linear factor sized to the file's loudest
+    moment — it does not reshape how the rest of the (typically much
+    quieter) material is distributed, so audio that's mostly quiet with
+    occasional peaks still colours mostly near 128 even at full
+    normalization. color_gamma fixes that: it's the same expand-quiet-
+    values technique as amplitude_gamma below, but applied to which byte
+    gets looked up for hue instead of to brightness. color_gamma < 1 pushes
+    quiet-but-nonzero bytes further from 128 before the palette lookup, so
+    more of the file lands away from the single hue that sits at 128 (e.g.
+    cyan/blue in rainbow/rainbow-bw) and the output uses more of the colour
+    wheel. 1.0 = no change (default).
+
     brightness_by_amplitude, when True, additionally scales each colour's
     brightness by how far the (normalized) byte sits from 128 — without
     this, hue changes with byte value but brightness stays maxed regardless
     of loudness, so a very quiet sample looks exactly as vivid as a
     full-scale peak. amplitude_gamma < 1 lifts quiet-but-audible samples
     above near-black so they stay visible rather than being crushed too
-    quickly (0.6 is a reasonable perceptual default; 1.0 = linear, no lift)."""
+    quickly (0.6 is a reasonable perceptual default; 1.0 = linear, no lift).
+    Brightness is scaled by true (pre-color_gamma) loudness, kept separate
+    from the reshaped hue position, so color_gamma only affects hue."""
     raw = np.arange(256, dtype=np.float64)
     normalized = np.clip(SILENCE_BYTE + (raw - SILENCE_BYTE) * normalize_scale, 0, 255)
-    normalized_bytes = normalized.round().astype(np.uint8)
 
-    lut = np.array([byte_to_color(int(b), palette) for b in normalized_bytes], dtype=np.float64)
+    hue_input = normalized
+    if color_gamma != 1.0:
+        offset = normalized - SILENCE_BYTE
+        magnitude = np.clip(np.abs(offset) / 128.0, 0.0, 1.0) ** color_gamma
+        hue_input = np.clip(SILENCE_BYTE + np.sign(offset) * magnitude * 128.0, 0, 255)
+    hue_bytes = hue_input.round().astype(np.uint8)
+
+    lut = np.array([byte_to_color(int(b), palette) for b in hue_bytes], dtype=np.float64)
     if brightness_by_amplitude:
         amplitude = np.abs(normalized - SILENCE_BYTE) / 128.0
         amplitude = np.clip(amplitude, 0.0, 1.0) ** amplitude_gamma
@@ -259,15 +280,15 @@ COLORSPACES = ["mono", "rgb", "yuv"]
 
 
 def bytes_to_pixels(data, colorspace, palette="rainbow", brightness_by_amplitude=False,
-                    amplitude_gamma=0.6, normalize_scale=1.0):
+                    amplitude_gamma=0.6, normalize_scale=1.0, color_gamma=1.0):
     """Converts raw bytes into an (N, 3) uint8 array of RGB pixel colours,
     where N is the number of complete pixels the data forms under the given
     colorspace. This is the one place that decides what a "pixel" means:
 
     'mono' (default) — one byte is one pixel, coloured via palette_lut()
     (the gray/rainbow/rainbow-bw hue-or-brightness mapping used throughout
-    this tool). brightness_by_amplitude/amplitude_gamma/normalize_scale only
-    apply here.
+    this tool). brightness_by_amplitude/amplitude_gamma/normalize_scale/
+    color_gamma only apply here.
 
     'rgb' — three consecutive bytes are one pixel's literal R, G, B channel
     values, used directly with no lookup or transform (a trailing 1-2 byte
@@ -281,11 +302,12 @@ def bytes_to_pixels(data, colorspace, palette="rainbow", brightness_by_amplitude
     colour; near-128 U/V (common in quiet/uniform data) reads close to
     grayscale, since chroma is near zero regardless of luma.
 
-    palette/brightness_by_amplitude/amplitude_gamma/normalize_scale are
-    ignored for 'rgb'/'yuv' — those concepts (silence-centred hue/brightness
-    mapping) are specific to the single-byte 'mono' interpretation."""
+    palette/brightness_by_amplitude/amplitude_gamma/normalize_scale/
+    color_gamma are ignored for 'rgb'/'yuv' — those concepts (silence-
+    centred hue/brightness mapping) are specific to the single-byte 'mono'
+    interpretation."""
     if colorspace == "mono":
-        lut = palette_lut(palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)
+        lut = palette_lut(palette, brightness_by_amplitude, amplitude_gamma, normalize_scale, color_gamma)
         arr = np.frombuffer(data, dtype=np.uint8)
         return lut[arr]
 
@@ -316,9 +338,9 @@ def pixel_count_for(n_bytes, colorspace):
 
 
 def build_full_image(data, width, pixel_size, palette, brightness_by_amplitude=False,
-                     amplitude_gamma=0.6, normalize_scale=1.0, colorspace="mono"):
+                     amplitude_gamma=0.6, normalize_scale=1.0, colorspace="mono", color_gamma=1.0):
     pixels = bytes_to_pixels(data, colorspace, palette, brightness_by_amplitude,
-                              amplitude_gamma, normalize_scale)
+                              amplitude_gamma, normalize_scale, color_gamma)
     n = pixels.shape[0]
     height = math.ceil(n / width) if n else 1
 
@@ -351,7 +373,7 @@ def safe_pixel_size(n_pixel_units, width, requested_pixel_size, max_total_pixels
 
 def build_row_window(data, width, pixel_size, palette, row_start, row_count,
                      brightness_by_amplitude=False, amplitude_gamma=0.6,
-                     normalize_scale=1.0, colorspace="mono"):
+                     normalize_scale=1.0, colorspace="mono", color_gamma=1.0):
     """Renders only rows [row_start, row_start+row_count) of the pixel grid,
     instead of materializing the entire (potentially huge) image. Rows
     beyond the available data are left black. This is what keeps video
@@ -370,7 +392,7 @@ def build_row_window(data, width, pixel_size, palette, row_start, row_count,
     chunk = data[start_byte:end_byte] if start_byte < end_byte else b""
 
     pixels = bytes_to_pixels(chunk, colorspace, palette, brightness_by_amplitude,
-                              amplitude_gamma, normalize_scale) if chunk else np.zeros((0, 3), dtype=np.uint8)
+                              amplitude_gamma, normalize_scale, color_gamma) if chunk else np.zeros((0, 3), dtype=np.uint8)
 
     grid = np.zeros((row_count * width, 3), dtype=np.uint8)
     grid[:pixels.shape[0]] = pixels
@@ -544,7 +566,7 @@ def make_video(data, width, pixel_size, palette, audio_path, out_path,
                fps=30, viewport_height=480, video_width=None, video_height=None,
                encoder="auto", codec_family="h264", scale_filter="nearest",
                brightness_by_amplitude=False, amplitude_gamma=0.6, normalize_scale=1.0,
-               colorspace="mono", quality=18):
+               colorspace="mono", quality=18, color_gamma=1.0):
     """Renders an MP4 that scrolls through the byte-image in sync with the
     audio's actual duration. Requires ffmpeg on PATH.
 
@@ -577,8 +599,8 @@ def make_video(data, width, pixel_size, palette, audio_path, out_path,
     direct R/G/B channels), 'yuv' (3 bytes = 1 pixel, Y/U/V converted to
     RGB). See bytes_to_pixels().
 
-    brightness_by_amplitude / amplitude_gamma / normalize_scale: see
-    palette_lut() — only apply when colorspace='mono'."""
+    brightness_by_amplitude / amplitude_gamma / normalize_scale / color_gamma:
+    see palette_lut() — only apply when colorspace='mono'."""
     n = pixel_count_for(len(data), colorspace)
     W = width * pixel_size
     total_rows = max(1, math.ceil(n / width))
@@ -646,7 +668,7 @@ def make_video(data, width, pixel_size, palette, audio_path, out_path,
             row_start = max(0, int(y0 // pixel_size) - 1)
             window_img = build_row_window(data, width, pixel_size, palette, row_start, rows_per_window,
                                            brightness_by_amplitude, amplitude_gamma, normalize_scale,
-                                           colorspace)
+                                           colorspace, color_gamma)
             local_y0 = y0 - row_start * pixel_size
 
             frame = window_img.crop((0, int(local_y0), W, int(local_y0) + vp_h))
@@ -759,6 +781,16 @@ def main():
                               "squashed into a narrow band around silence (often reading as mostly one "
                               "colour, e.g. blue/cyan). Pass this flag to disable it and colour bytes by "
                               "their raw value directly.")
+    parser.add_argument("--color-gamma", type=float, default=1.0,
+                         help="Reshapes which byte gets looked up for hue, on top of --no-normalize's "
+                              "linear peak-based stretch. Normalization alone doesn't help when most of "
+                              "the file is quiet with only occasional peaks (typical audio) — it still "
+                              "colours mostly near silence's hue (e.g. cyan/blue in rainbow/rainbow-bw), "
+                              "since it just scales the whole distribution by one factor. Values < 1.0 "
+                              "(e.g. 0.5) push quiet-but-nonzero bytes further from the silence hue before "
+                              "lookup, spreading output across more of the colour wheel; 1.0 (default) "
+                              "makes no change. Brightness (--brightness-by-amplitude) is unaffected — it "
+                              "still reflects true loudness, not the reshaped hue position.")
     parser.add_argument("--colorspace", choices=COLORSPACES, default="mono",
                          help="How bytes become pixels: mono (default) — 1 byte = 1 pixel, coloured via "
                               "--palette (plus --brightness-by-amplitude/--no-normalize, which only apply "
@@ -776,10 +808,10 @@ def main():
     print_field("Input", f"{args.input} ({len(data)} bytes decoded @ {sample_rate}Hz)")
 
     is_mono = args.colorspace == "mono"
-    if not is_mono and (args.brightness_by_amplitude or not args.no_normalize):
+    if not is_mono and (args.brightness_by_amplitude or not args.no_normalize or args.color_gamma != 1.0):
         print_note(f"--colorspace {args.colorspace} colours pixels directly from raw R/G/B or Y/U/V "
-                   f"channel bytes — --palette, --brightness-by-amplitude, and colour normalization "
-                   f"only apply to --colorspace mono, so they're ignored here.")
+                   f"channel bytes — --palette, --brightness-by-amplitude, --color-gamma, and colour "
+                   f"normalization only apply to --colorspace mono, so they're ignored here.")
 
     normalize_scale = 1.0
     if is_mono and not args.no_normalize:
@@ -806,7 +838,7 @@ def main():
                        f"the RAM for the full resolution.")
         build_full_image(data, args.width, image_pixel_size, args.palette,
                           args.brightness_by_amplitude, args.amplitude_gamma,
-                          normalize_scale, args.colorspace).save(image_path)
+                          normalize_scale, args.colorspace, args.color_gamma).save(image_path)
         print_field("Image", image_path)
 
     if args.save_bytes:
@@ -831,7 +863,8 @@ def main():
                    amplitude_gamma=args.amplitude_gamma,
                    normalize_scale=normalize_scale,
                    colorspace=args.colorspace,
-                   quality=args.quality)
+                   quality=args.quality,
+                   color_gamma=args.color_gamma)
         print_field("Video", video_path)
 
 

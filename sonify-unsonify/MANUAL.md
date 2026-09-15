@@ -166,6 +166,7 @@ python3 unsonify.py drone.wav --brightness-by-amplitude --amplitude-gamma 0.5
 python3 unsonify.py song.mp3 --colorspace rgb
 python3 unsonify.py song.mp3 --colorspace yuv --width 96
 python3 unsonify.py kick-pattern.wav --video-width 2328 --video-height 640 --quality 12
+python3 unsonify.py kick-pattern.wav --palette rainbow-bw --color-gamma 0.4
 ```
 
 ### CLI reference
@@ -189,6 +190,8 @@ python3 unsonify.py kick-pattern.wav --video-width 2328 --video-height 640 --qua
 | `--quality` | `18` | Video encoding quality, 0 (best/largest) to 51 (worst/smallest), same scale as x264/x265 CRF — see [Quality](#quality) |
 | `--brightness-by-amplitude` | off | Scale colour brightness by loudness (distance from silence) instead of every non-silent byte rendering at full brightness — see [Volume-to-brightness](#volume-to-brightness) |
 | `--amplitude-gamma` | `0.6` | Only with `--brightness-by-amplitude`. Gamma curve lifting quiet-but-audible sounds above near-black — see [Volume-to-brightness](#volume-to-brightness) |
+| `--no-normalize` | off | Disable peak-based colour normalization (on by default) and colour bytes by their raw value directly — see [Colour spread](#colour-spread---color-gamma) |
+| `--color-gamma` | `1.0` | Reshapes which byte gets looked up for hue, spreading output across more of the colour wheel for mostly-quiet audio — see [Colour spread](#colour-spread---color-gamma) |
 | `--no-image` | off | Skip standalone PNG generation entirely — see [Memory & performance](#memory--performance) |
 | `--max-image-pixels` | `50,000,000` | Safety cap (total pixels) for the standalone PNG before `--pixel-size` is auto-reduced — see [Memory & performance](#memory--performance) |
 | `--colorspace {mono,rgb,yuv}` | `mono` | How bytes become pixels — see [Colour spaces](#colour-spaces) |
@@ -219,7 +222,7 @@ apply to `--save-bytes`, since that path is explicitly chosen by the caller.
 | `byte_to_color(b, palette)` | Same as in `sonify.py` — maps a byte to an RGB colour, used by the `mono` colour space |
 | `bytes_to_pixels(data, colorspace, palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)` | Turns raw bytes into an `(N, 3)` RGB pixel array under the selected colour space — see [Colour spaces](#colour-spaces) |
 | `pixel_count_for(n_bytes, colorspace)` | Pixel count for a given byte count under a colour space — `n_bytes` for `mono`, `n_bytes // 3` for `rgb`/`yuv` |
-| `palette_lut(palette, brightness_by_amplitude, amplitude_gamma)` / `build_full_image(...)` | Vectorized numpy colour lookup and full byte-map image build — colour-space-aware via `bytes_to_pixels()`, with optional amplitude-based brightness scaling (`mono` only), see [Volume-to-brightness](#volume-to-brightness) |
+| `palette_lut(palette, brightness_by_amplitude, amplitude_gamma, normalize_scale, color_gamma)` / `build_full_image(...)` | Vectorized numpy colour lookup and full byte-map image build — colour-space-aware via `bytes_to_pixels()`, with optional amplitude-based brightness scaling and hue-spread reshaping (`mono` only), see [Volume-to-brightness](#volume-to-brightness) and [Colour spread](#colour-spread---color-gamma) |
 | `safe_pixel_size(...)` | Same as in `sonify.py` — see [Memory & performance](#memory--performance); takes a pixel count (via `pixel_count_for`), not a raw byte count |
 | `build_row_window(...)` | Same as in `sonify.py`, now also amplitude-brightness-aware and colour-space-aware — used by `make_video` for bounded-memory frame rendering |
 | `list_ffmpeg_encoders()` / `choose_encoder()` / `test_encoder_runtime()` / `quality_args()` | Same as in `sonify.py`, codec-family-aware — see [GPU encoding](#gpu-encoding) |
@@ -256,6 +259,37 @@ disappearing. Confirmed effect on a real byte, palette `rainbow`:
 |---|---|---|---|
 | `132` | Barely audible | `(0, 227, 255)` — fully bright | `(0, 28, 31)` — dim |
 | `255` | Full-scale peak | `(255, 0, 0)` — fully bright | `(253, 0, 0)` — still fully bright |
+
+### Colour spread (--color-gamma)
+
+Also `unsonify.py`-specific, `--colorspace mono` only. Normalization
+(`--no-normalize` off, the default) only applies a single **linear** factor
+sized to the file's loudest moment — it stretches the whole distribution
+uniformly, it doesn't reshape it. Most real audio (a kick pattern especially)
+is mostly quiet with occasional peaks, so even at full normalization the
+bulk of the file still sits close to byte `128` and renders in whichever
+single hue lives there (cyan/blue in `rainbow`/`rainbow-bw`) — normalization
+alone can't fix that, since it scales quiet and loud parts by the same
+factor.
+
+`--color-gamma` (default `1.0`, no change) fixes this by reshaping *which
+byte gets looked up for hue* — the same expand-quiet-values technique
+`--amplitude-gamma` already applies to brightness, applied to hue position
+instead: `magnitude = (abs(byte-128)/128) ** color_gamma`, re-centred around
+128. Values below `1.0` (e.g. `0.4`-`0.6`) push quiet-but-nonzero bytes
+further from the silence hue before the palette lookup, spreading the output
+across more of the colour wheel instead of clustering in one hue. Brightness
+(`--brightness-by-amplitude`) is computed from the true, pre-`color_gamma`
+loudness, so it isn't affected — only hue diversity changes.
+
+Confirmed effect on a synthetic "mostly-quiet-with-peaks" byte stream (9080
+bytes, `rainbow-bw`, normalized): at the default `color_gamma=1.0`, 7627 of
+9080 pixels landed in a single 1/12th hue bucket; at `color_gamma=0.4`, the
+same data spread across six hue buckets instead.
+
+```
+python3 unsonify.py kick-pattern.wav --palette rainbow-bw --color-gamma 0.4
+```
 
 ### Colour spaces
 

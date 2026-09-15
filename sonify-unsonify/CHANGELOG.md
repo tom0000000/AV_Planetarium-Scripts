@@ -3,6 +3,29 @@
 All notable changes to `sonify.py` / `unsonify.py`, in the order they were
 developed. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.0]
+
+### Added: --color-gamma, to fix output clustering in a single hue
+- Colour sensitivity normalization (on by default) only applies one
+  **linear** factor sized to the file's loudest moment — it stretches the
+  whole distribution uniformly but doesn't reshape it. Most real audio
+  (e.g. a kick pattern) is mostly quiet with occasional peaks, so even at
+  full normalization the bulk of the file still colours near byte 128's hue
+  (cyan/blue in `rainbow`/`rainbow-bw`), with no way to spread it out.
+- New `--color-gamma` (default `1.0`, no change) fixes this: the same
+  expand-quiet-values technique `--amplitude-gamma` already applies to
+  brightness, now applied to which byte gets looked up for hue instead.
+  Values below `1.0` (e.g. `0.4`-`0.6`) push quiet-but-nonzero bytes further
+  from the silence hue before the palette lookup, spreading output across
+  more of the colour wheel. `--brightness-by-amplitude` brightness is
+  computed from true (pre-`color_gamma`) loudness, so it's unaffected.
+- Confirmed on a synthetic mostly-quiet-with-peaks byte stream: 7627/9080
+  pixels landed in one hue bucket at `color_gamma=1.0` (default), spread
+  across six buckets at `color_gamma=0.4`.
+- `mono` colour space only, same as `--palette`/`--brightness-by-amplitude`/
+  normalization — ignored (with a note) under `--colorspace rgb`/`yuv`.
+- Documented in MANUAL.md (new "Colour spread" subsection) and README.md.
+
 ## [1.3.0]
 
 ### Fixed: video output was badly blurred, edges not sharp
