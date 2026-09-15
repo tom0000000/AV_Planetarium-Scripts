@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated outputs (these are run outputs, not source)
+*.wav
+*.mp4
+*.png
+*.bin
+!examples/**
+
+# OS cruft
+.DS_Store
+Thumbs.db
