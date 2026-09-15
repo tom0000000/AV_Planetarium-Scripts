@@ -307,6 +307,34 @@ ENCODER_CODECS = {
     "cpu": {"h264": "libx264", "hevc": "libx265"},
 }
 
+CODEC_TO_VENDOR = {codec: vendor for vendor, family in ENCODER_CODECS.items() for codec in family.values()}
+
+
+def quality_args(vendor, quality):
+    """Returns the ffmpeg args that pin a given encoder vendor to a target
+    quality level, instead of leaving rate control at the encoder's own
+    default. Without this, the default bitrate/rate-control heuristics
+    (tuned for natural video) badly blur the hard, high-frequency block
+    edges this tool's output is made of — flat colour squares are close to
+    worst-case content for DCT-based compression at an uncontrolled bitrate.
+
+    quality uses the same 0 (best/largest) - 51 (worst/smallest) scale as
+    x264/x265 CRF for every vendor, so one --quality value means roughly
+    the same thing regardless of which encoder ends up being used."""
+    quality = max(0, min(51, quality))
+    if vendor == "cpu":
+        return ["-preset", "medium", "-crf", str(quality)]
+    if vendor == "nvenc":
+        return ["-preset", "p5", "-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
+    if vendor == "qsv":
+        return ["-global_quality", str(quality)]
+    if vendor == "amf":
+        return ["-rc", "cqp", "-qp_i", str(quality), "-qp_p", str(quality), "-quality", "quality"]
+    if vendor == "videotoolbox":
+        # videotoolbox has no CRF; -q:v is an approximate 1(worst)-100(best) scale
+        return ["-q:v", str(max(1, min(100, 100 - quality * 2)))]
+    return []
+
 
 def list_ffmpeg_encoders():
     result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
@@ -455,10 +483,15 @@ SCALE_FILTERS = {
 
 def make_video(data, width, pixel_size, palette, audio_path, out_path,
                fps=30, viewport_height=480, video_width=None, video_height=None,
-               encoder="auto", codec_family="h264", scale_filter="nearest"):
+               encoder="auto", codec_family="h264", scale_filter="nearest", quality=18):
     """
     Renders an MP4 that scrolls through the byte-image in sync with the
     audio's actual duration. Requires ffmpeg on PATH.
+
+    quality pins the encoder to a target quality (0=best/largest,
+    51=worst/smallest, same scale as x264/x265 CRF) via quality_args(),
+    instead of leaving rate control at the encoder's own default — see
+    quality_args() for why this matters for this tool's content.
 
     video_width / video_height optionally set the final output resolution
     independently of --width/--pixel-size/--viewport-height, which otherwise
@@ -525,6 +558,7 @@ def make_video(data, width, pixel_size, palette, audio_path, out_path,
     if codec_family == "hevc":
         # tags the stream so QuickTime/Apple players recognize HEVC-in-MP4
         ffmpeg_cmd += ["-tag:v", "hvc1"]
+    ffmpeg_cmd += quality_args(CODEC_TO_VENDOR.get(codec, "cpu"), quality)
     ffmpeg_cmd += [
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
@@ -647,6 +681,13 @@ def main():
                               "nearest (default) keeps byte blocks perfectly crisp with no blending — "
                               "the right choice for this grid content; lanczos/bicubic are smoother and "
                               "suit photographic footage, but blur/ring at hard block edges here")
+    parser.add_argument("--quality", type=int, default=18,
+                         help="Video encoding quality, 0 (best/largest file) to 51 (worst/smallest), same "
+                              "scale as x264/x265 CRF, applied regardless of which encoder is used "
+                              "(default: 18, near-visually-lossless). Without this, encoders fall back to "
+                              "rate-control defaults tuned for natural video, which badly blur this tool's "
+                              "sharp, flat-colour block edges — raise it only if file size matters more "
+                              "than crisp edges.")
     args = parser.parse_args()
 
     data = read_bytes(args.input)
@@ -679,7 +720,7 @@ def main():
                    viewport_height=args.viewport_height,
                    video_width=args.video_width, video_height=args.video_height,
                    encoder=args.encoder, codec_family=args.codec,
-                   scale_filter=args.scale_filter)
+                   scale_filter=args.scale_filter, quality=args.quality)
         print_field("Video", video_path)
 
 

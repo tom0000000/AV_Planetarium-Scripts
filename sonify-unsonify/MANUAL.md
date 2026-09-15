@@ -59,6 +59,7 @@ python3 sonify.py input_file --mode tone --note-map scale --key C --scale-mode m
 python3 sonify.py input_file --sample-rate 22050 --width 128 --outdir out/
 python3 sonify.py input_file --video-width 6984 --encoder nvenc --codec hevc
 python3 sonify.py input_file --video-width 6894 --video-height 1920 --scale-filter nearest
+python3 sonify.py input_file --video-width 2328 --video-height 640 --quality 12
 ```
 
 ### CLI reference
@@ -86,6 +87,7 @@ python3 sonify.py input_file --video-width 6894 --video-height 1920 --scale-filt
 | `--encoder {auto,cpu,nvenc,qsv,amf,videotoolbox}` | `auto` | Video encoder vendor — see [GPU encoding](#gpu-encoding) |
 | `--codec {h264,hevc}` | `h264` | Video codec family — see [GPU encoding](#gpu-encoding) |
 | `--scale-filter {nearest,lanczos,bicubic}` | `nearest` | Resampling used when resizing to `--video-width`/`--video-height` — see [Resolution](#resolution) |
+| `--quality` | `18` | Video encoding quality, 0 (best/largest) to 51 (worst/smallest), same scale as x264/x265 CRF — see [Quality](#quality) |
 | `--no-image` | off | Skip standalone PNG generation entirely — see [Memory & performance](#memory--performance) |
 | `--max-image-pixels` | `50,000,000` | Safety cap (total pixels) for the standalone PNG before `--pixel-size` is auto-reduced — see [Memory & performance](#memory--performance) |
 
@@ -120,6 +122,7 @@ so repeated runs never silently overwrite prior output. See `unique_path()`.
 | `list_ffmpeg_encoders()` | Returns the list of encoders this ffmpeg build supports |
 | `choose_encoder(preference, codec_family)` | Picks the ffmpeg video codec per `--encoder`/`--codec` (see [GPU encoding](#gpu-encoding)) |
 | `test_encoder_runtime(codec, width, height)` | Confirms a hardware encoder actually works (not just compiled in) via a 1-frame test encode |
+| `quality_args(vendor, quality)` | Maps `--quality` to the target encoder vendor's actual rate-control flags — see [Quality](#quality) |
 | `format_hms(seconds)` | Formats seconds as `H:MM:SS` for the progress display |
 | `resolve_output_size(grid_w, grid_h, video_width, video_height)` | Works out the final video resolution (see [Resolution](#resolution)) |
 | `make_video(...)` | Renders the scrolling MP4 frame-by-frame via `build_row_window`, muxing video + audio via ffmpeg — resizes via `SCALE_FILTERS[scale_filter]` when `--video-width`/`--video-height` require it |
@@ -162,6 +165,7 @@ python3 unsonify.py long_recording.wav --max-image-pixels 500000000
 python3 unsonify.py drone.wav --brightness-by-amplitude --amplitude-gamma 0.5
 python3 unsonify.py song.mp3 --colorspace rgb
 python3 unsonify.py song.mp3 --colorspace yuv --width 96
+python3 unsonify.py kick-pattern.wav --video-width 2328 --video-height 640 --quality 12
 ```
 
 ### CLI reference
@@ -182,6 +186,7 @@ python3 unsonify.py song.mp3 --colorspace yuv --width 96
 | `--encoder {auto,cpu,nvenc,qsv,amf,videotoolbox}` | `auto` | Video encoder vendor — see [GPU encoding](#gpu-encoding) |
 | `--codec {h264,hevc}` | `h264` | Video codec family — see [GPU encoding](#gpu-encoding) |
 | `--scale-filter {nearest,lanczos,bicubic}` | `nearest` | Resampling used when resizing to `--video-width`/`--video-height` — see [Resolution](#resolution) |
+| `--quality` | `18` | Video encoding quality, 0 (best/largest) to 51 (worst/smallest), same scale as x264/x265 CRF — see [Quality](#quality) |
 | `--brightness-by-amplitude` | off | Scale colour brightness by loudness (distance from silence) instead of every non-silent byte rendering at full brightness — see [Volume-to-brightness](#volume-to-brightness) |
 | `--amplitude-gamma` | `0.6` | Only with `--brightness-by-amplitude`. Gamma curve lifting quiet-but-audible sounds above near-black — see [Volume-to-brightness](#volume-to-brightness) |
 | `--no-image` | off | Skip standalone PNG generation entirely — see [Memory & performance](#memory--performance) |
@@ -217,7 +222,7 @@ apply to `--save-bytes`, since that path is explicitly chosen by the caller.
 | `palette_lut(palette, brightness_by_amplitude, amplitude_gamma)` / `build_full_image(...)` | Vectorized numpy colour lookup and full byte-map image build — colour-space-aware via `bytes_to_pixels()`, with optional amplitude-based brightness scaling (`mono` only), see [Volume-to-brightness](#volume-to-brightness) |
 | `safe_pixel_size(...)` | Same as in `sonify.py` — see [Memory & performance](#memory--performance); takes a pixel count (via `pixel_count_for`), not a raw byte count |
 | `build_row_window(...)` | Same as in `sonify.py`, now also amplitude-brightness-aware and colour-space-aware — used by `make_video` for bounded-memory frame rendering |
-| `list_ffmpeg_encoders()` / `choose_encoder()` / `test_encoder_runtime()` | Same as in `sonify.py`, codec-family-aware — see [GPU encoding](#gpu-encoding) |
+| `list_ffmpeg_encoders()` / `choose_encoder()` / `test_encoder_runtime()` / `quality_args()` | Same as in `sonify.py`, codec-family-aware — see [GPU encoding](#gpu-encoding) |
 | `format_hms(seconds)` | Same as in `sonify.py` |
 | `resolve_output_size(...)` | Same as in `sonify.py` — see [Resolution](#resolution) |
 | `make_video(...)` | Same approach as in `sonify.py` (windowed rendering, `scale_filter`-aware resize, amplitude-brightness-aware), but the audio track is a WAV rebuilt from the decoded bytes rather than the original input |
@@ -369,6 +374,33 @@ resolution over 4096px in either dimension, both scripts print an advisory
 up front suggesting `--codec hevc`, since that combination is essentially
 guaranteed to fail the runtime test and silently fall back to slower CPU
 encoding otherwise.
+
+#### Quality
+
+`--quality` (default `18`, range `0`-`51`, same scale as x264/x265 CRF —
+lower is better/larger) pins the chosen encoder to a target quality via
+`quality_args()`, instead of leaving rate control at that encoder's own
+default. This matters a lot for this tool's output specifically: flat,
+hard-edged colour blocks are close to worst-case content for H.264/H.265's
+DCT-based compression, and an uncontrolled default bitrate (tuned for
+natural video, which has far less high-frequency detail) visibly blurs and
+blocks the byte-square edges. The default of `18` is near-visually-lossless;
+raise it (e.g. `30`-`40`) only if file size matters more than crisp edges.
+
+`quality_args()` maps the same `--quality` value to each vendor's actual
+flags:
+
+| Vendor | Args |
+|---|---|
+| `cpu` | `-preset medium -crf <quality>` |
+| `nvenc` | `-preset p5 -rc vbr -cq <quality> -b:v 0` |
+| `qsv` | `-global_quality <quality>` |
+| `amf` | `-rc cqp -qp_i <quality> -qp_p <quality> -quality quality` |
+| `videotoolbox` | `-q:v <100 - quality*2>` (videotoolbox has no CRF; approximated on its 1-100, higher-is-better scale) |
+
+The vendor is looked up from the final, already-fallback-resolved codec via
+`CODEC_TO_VENDOR` (the reverse of `ENCODER_CODECS`), so the right quality
+args are used even when a requested hardware encoder fell back to CPU.
 
 **Progress display:** during rendering, both scripts print a live-updating
 line: frame count, percentage, elapsed time, estimated remaining time, and

@@ -3,6 +3,26 @@
 All notable changes to `sonify.py` / `unsonify.py`, in the order they were
 developed. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0]
+
+### Fixed: video output was badly blurred, edges not sharp
+- `make_video()` in both scripts previously handed ffmpeg no quality or
+  bitrate control at all (`-c:v <codec> -pix_fmt yuv420p` and nothing else),
+  leaving the encoder's own default rate control in charge. Flat, hard-edged
+  colour blocks — exactly what this tool's output is made of — are close to
+  worst-case content for H.264/H.265 compression at an uncontrolled/default
+  bitrate, so output was visibly blurred/blocky even though `--scale-filter
+  nearest` (the default) was correctly keeping the pre-encode frame sharp.
+- New `--quality` flag (default `18`, range `0`-`51`, same scale as
+  x264/x265 CRF — lower is better/larger) fixes this by pinning whichever
+  encoder gets used to an explicit quality target via new `quality_args()`,
+  mapped per vendor: `-crf` (CPU), `-cq`/VBR (nvenc), `-global_quality`
+  (qsv), `-rc cqp`/`-qp_i`/`-qp_p` (amf), `-q:v` (videotoolbox). The default
+  is near-visually-lossless; raise it only if file size matters more than
+  crisp block edges.
+- New `CODEC_TO_VENDOR` reverse-lookup so the right quality args are used
+  even after a requested hardware encoder falls back to CPU.
+
 ## [1.2.0]
 
 ### Added: auto-numbered output filenames
