@@ -154,6 +154,8 @@ python3 unsonify.py input.wav --no-video --save-bytes recovered.bin
 python3 unsonify.py long_recording.wav --no-image
 python3 unsonify.py long_recording.wav --max-image-pixels 500000000
 python3 unsonify.py drone.wav --brightness-by-amplitude --amplitude-gamma 0.5
+python3 unsonify.py song.mp3 --colorspace rgb
+python3 unsonify.py song.mp3 --colorspace yuv --width 96
 ```
 
 ### CLI reference
@@ -178,12 +180,13 @@ python3 unsonify.py drone.wav --brightness-by-amplitude --amplitude-gamma 0.5
 | `--amplitude-gamma` | `0.6` | Only with `--brightness-by-amplitude`. Gamma curve lifting quiet-but-audible sounds above near-black — see [Volume-to-brightness](#volume-to-brightness) |
 | `--no-image` | off | Skip standalone PNG generation entirely — see [Memory & performance](#memory--performance) |
 | `--max-image-pixels` | `50,000,000` | Safety cap (total pixels) for the standalone PNG before `--pixel-size` is auto-reduced — see [Memory & performance](#memory--performance) |
+| `--colorspace {mono,rgb,yuv}` | `mono` | How bytes become pixels — see [Colour spaces](#colour-spaces) |
 
 ### Outputs (in `--outdir`)
 
-- `<name>_<palette>.png` — the byte-map image (unless `--no-image`)
+- `<name>_<palette-or-colorspace>.png` — the byte-map image (unless `--no-image`); named by `--palette` under `mono`, by `--colorspace` under `rgb`/`yuv`
 - `<name>_audio.wav` — the WAV rebuilt from extracted bytes (only if generating video)
-- `<name>_<palette>.mp4` — the scrolling video (unless `--no-video`)
+- `<name>_<palette-or-colorspace>.mp4` — the scrolling video (unless `--no-video`)
 - the file at `--save-bytes`, if given — raw extracted bytes
 
 ### Function reference
@@ -194,10 +197,12 @@ python3 unsonify.py drone.wav --brightness-by-amplitude --amplitude-gamma 0.5
 | `decode_to_bytes(audio_path, sample_rate)` | Uses ffmpeg to decode any audio file to raw 8-bit unsigned mono PCM bytes at the given rate |
 | `write_wav(data, sample_rate, out_path)` | Writes bytes as an 8-bit unsigned mono WAV |
 | `wav_duration_seconds(wav_path)` | Reads a WAV's exact duration |
-| `byte_to_color(b, palette)` | Same as in `sonify.py` — maps a byte to an RGB colour |
-| `palette_lut(palette, brightness_by_amplitude, amplitude_gamma)` / `build_full_image(...)` | Vectorized numpy colour lookup and full byte-map image build — now with optional amplitude-based brightness scaling, see [Volume-to-brightness](#volume-to-brightness) |
-| `safe_pixel_size(...)` | Same as in `sonify.py` — see [Memory & performance](#memory--performance) |
-| `build_row_window(...)` | Same as in `sonify.py`, now also amplitude-brightness-aware — used by `make_video` for bounded-memory frame rendering |
+| `byte_to_color(b, palette)` | Same as in `sonify.py` — maps a byte to an RGB colour, used by the `mono` colour space |
+| `bytes_to_pixels(data, colorspace, palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)` | Turns raw bytes into an `(N, 3)` RGB pixel array under the selected colour space — see [Colour spaces](#colour-spaces) |
+| `pixel_count_for(n_bytes, colorspace)` | Pixel count for a given byte count under a colour space — `n_bytes` for `mono`, `n_bytes // 3` for `rgb`/`yuv` |
+| `palette_lut(palette, brightness_by_amplitude, amplitude_gamma)` / `build_full_image(...)` | Vectorized numpy colour lookup and full byte-map image build — colour-space-aware via `bytes_to_pixels()`, with optional amplitude-based brightness scaling (`mono` only), see [Volume-to-brightness](#volume-to-brightness) |
+| `safe_pixel_size(...)` | Same as in `sonify.py` — see [Memory & performance](#memory--performance); takes a pixel count (via `pixel_count_for`), not a raw byte count |
+| `build_row_window(...)` | Same as in `sonify.py`, now also amplitude-brightness-aware and colour-space-aware — used by `make_video` for bounded-memory frame rendering |
 | `list_ffmpeg_encoders()` / `choose_encoder()` / `test_encoder_runtime()` | Same as in `sonify.py`, codec-family-aware — see [GPU encoding](#gpu-encoding) |
 | `format_hms(seconds)` | Same as in `sonify.py` |
 | `resolve_output_size(...)` | Same as in `sonify.py` — see [Resolution](#resolution) |
@@ -232,6 +237,28 @@ disappearing. Confirmed effect on a real byte, palette `rainbow`:
 |---|---|---|---|
 | `132` | Barely audible | `(0, 227, 255)` — fully bright | `(0, 28, 31)` — dim |
 | `255` | Full-scale peak | `(255, 0, 0)` — fully bright | `(253, 0, 0)` — still fully bright |
+
+### Colour spaces
+
+Also `unsonify.py`-specific. `--colorspace` decides what a "pixel" *is*,
+independent of `--palette`:
+
+| Colour space | Bytes per pixel | How | Notes |
+|---|---|---|---|
+| `mono` (default) | 1 | Each byte is one pixel, coloured via `--palette`'s hue/brightness mapping (`byte_to_color`) | The only mode `--palette`, `--brightness-by-amplitude`, and colour normalization apply to |
+| `rgb` | 3 | Three consecutive bytes are used directly as one pixel's literal R, G, B channel values — no lookup, no hue mapping | Same direct byte-to-channel technique as the binary-waterfall project's "rgb" format |
+| `yuv` | 3 | Three consecutive bytes are read as Y (luma), U, V (chroma) and converted to RGB via the standard BT.601 formula, treating U/V as signed offsets from 128 | Chroma-heavy byte patterns produce saturated colour; near-128 U/V (common in quiet/uniform data) reads close to grayscale |
+
+Because `rgb`/`yuv` consume 3 bytes per pixel instead of 1, images and video
+are correspondingly **3x smaller** (fewer total pixels) than the same file
+under `mono`. A trailing 1–2 byte remainder that doesn't complete a final
+pixel is dropped.
+
+`--palette`, `--brightness-by-amplitude`/`--amplitude-gamma`, and colour
+sensitivity normalization are all `mono`-only concepts (they rely on byte
+`128` meaning "silence," which only applies to the single-byte
+interpretation) — passing them alongside `--colorspace rgb`/`yuv` prints a
+note that they're being ignored rather than silently doing nothing.
 
 ---
 

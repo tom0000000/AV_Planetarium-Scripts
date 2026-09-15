@@ -3,6 +3,30 @@
 All notable changes to `sonify.py` / `unsonify.py`, in the order they were
 developed. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.0]
+
+### Added: colour spaces in unsonify.py
+- `--colorspace {mono,rgb,yuv}` (default `mono`, unchanged behaviour):
+  decides how decoded audio bytes become pixels, independent of `--palette`.
+  - `mono` — existing 1-byte-per-pixel behaviour (`--palette` hue/brightness
+    mapping).
+  - `rgb` — 3 consecutive bytes used directly as one pixel's literal R, G, B
+    channels, no palette lookup involved.
+  - `yuv` — 3 consecutive bytes read as Y/U/V (BT.601) and converted to RGB.
+  - `rgb`/`yuv` produce images/video with 3x fewer pixels than `mono` for
+    the same input, since they consume 3 bytes per pixel instead of 1.
+- New `bytes_to_pixels()` centralizes the byte-to-pixel-array conversion for
+  all three colour spaces; `build_full_image()`, `build_row_window()`, and
+  `make_video()` now route through it and are colour-space-aware.
+- `--palette`, `--brightness-by-amplitude`/`--amplitude-gamma`, and colour
+  sensitivity normalization remain `mono`-only (they depend on byte `128`
+  meaning "silence"); passing them with `--colorspace rgb`/`yuv` now prints
+  a note that they're ignored instead of silently having no effect.
+- Output filenames for `rgb`/`yuv` are labelled by colour space
+  (`<name>_rgb.png`, `<name>_yuv.mp4`, etc.) instead of by `--palette`.
+- `unsonify.py`-only for now — `sonify.py`'s encode-side byte-mapping is
+  unchanged.
+
 ## [1.0.0]
 
 ### sonify.py — initial version

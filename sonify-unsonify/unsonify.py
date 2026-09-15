@@ -239,32 +239,93 @@ def palette_lut(palette, brightness_by_amplitude=False, amplitude_gamma=0.6, nor
     return lut.astype(np.uint8)
 
 
+COLORSPACES = ["mono", "rgb", "yuv"]
+
+
+def bytes_to_pixels(data, colorspace, palette="rainbow", brightness_by_amplitude=False,
+                    amplitude_gamma=0.6, normalize_scale=1.0):
+    """Converts raw bytes into an (N, 3) uint8 array of RGB pixel colours,
+    where N is the number of complete pixels the data forms under the given
+    colorspace. This is the one place that decides what a "pixel" means:
+
+    'mono' (default) — one byte is one pixel, coloured via palette_lut()
+    (the gray/rainbow/rainbow-bw hue-or-brightness mapping used throughout
+    this tool). brightness_by_amplitude/amplitude_gamma/normalize_scale only
+    apply here.
+
+    'rgb' — three consecutive bytes are one pixel's literal R, G, B channel
+    values, used directly with no lookup or transform (a trailing 1-2 byte
+    remainder that doesn't complete a pixel is dropped). This is the same
+    direct byte-to-channel technique as the binary-waterfall project's "rgb"
+    format — no hue mapping, no palette.
+
+    'yuv' — three consecutive bytes are read as Y (luma), U, V (chroma)
+    and converted to RGB via the standard BT.601 formula, treating U/V as
+    signed offsets from 128. Chroma-heavy byte patterns produce saturated
+    colour; near-128 U/V (common in quiet/uniform data) reads close to
+    grayscale, since chroma is near zero regardless of luma.
+
+    palette/brightness_by_amplitude/amplitude_gamma/normalize_scale are
+    ignored for 'rgb'/'yuv' — those concepts (silence-centred hue/brightness
+    mapping) are specific to the single-byte 'mono' interpretation."""
+    if colorspace == "mono":
+        lut = palette_lut(palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)
+        arr = np.frombuffer(data, dtype=np.uint8)
+        return lut[arr]
+
+    arr = np.frombuffer(data, dtype=np.uint8)
+    n_pixels = len(arr) // 3
+    arr = arr[:n_pixels * 3].reshape(n_pixels, 3).astype(np.int16)
+
+    if colorspace == "rgb":
+        rgb = arr.astype(np.float64)
+    elif colorspace == "yuv":
+        y = arr[:, 0].astype(np.float64)
+        u = arr[:, 1].astype(np.float64) - 128.0
+        v = arr[:, 2].astype(np.float64) - 128.0
+        r = y + 1.402 * v
+        g = y - 0.344136 * u - 0.714136 * v
+        b = y + 1.772 * u
+        rgb = np.stack([r, g, b], axis=1)
+    else:
+        raise ValueError(f"Unknown colorspace: {colorspace!r}")
+
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+def pixel_count_for(n_bytes, colorspace):
+    """How many complete pixels n_bytes of data forms under the given
+    colorspace — 1 byte/pixel for mono, 3 bytes/pixel for rgb/yuv."""
+    return n_bytes if colorspace == "mono" else n_bytes // 3
+
+
 def build_full_image(data, width, pixel_size, palette, brightness_by_amplitude=False,
-                     amplitude_gamma=0.6, normalize_scale=1.0):
-    n = len(data)
-    height = math.ceil(n / width)
-    lut = palette_lut(palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)
+                     amplitude_gamma=0.6, normalize_scale=1.0, colorspace="mono"):
+    pixels = bytes_to_pixels(data, colorspace, palette, brightness_by_amplitude,
+                              amplitude_gamma, normalize_scale)
+    n = pixels.shape[0]
+    height = math.ceil(n / width) if n else 1
 
-    grid = np.zeros(height * width, dtype=np.uint8)
-    grid[:n] = np.frombuffer(data, dtype=np.uint8)
-    grid = grid.reshape(height, width)
+    grid = np.zeros((height * width, 3), dtype=np.uint8)
+    grid[:n] = pixels
+    grid = grid.reshape(height, width, 3)
 
-    rgb = lut[grid]
     if pixel_size > 1:
-        rgb = rgb.repeat(pixel_size, axis=0).repeat(pixel_size, axis=1)
-    return Image.fromarray(rgb, "RGB")
+        grid = grid.repeat(pixel_size, axis=0).repeat(pixel_size, axis=1)
+    return Image.fromarray(grid, "RGB")
 
 
 MAX_IMAGE_PIXELS = 50_000_000  # safety cap for the standalone PNG (~150MB as raw RGB)
 
 
-def safe_pixel_size(n, width, requested_pixel_size, max_total_pixels=MAX_IMAGE_PIXELS):
-    """Shrinks pixel_size if rendering the full byte-image at the requested
-    size would need an unreasonable amount of memory (this scales with file
+def safe_pixel_size(n_pixel_units, width, requested_pixel_size, max_total_pixels=MAX_IMAGE_PIXELS):
+    """Shrinks pixel_size if rendering the full image at the requested size
+    would need an unreasonable amount of memory (this scales with file
     size, so a long audio file at the default --pixel-size can otherwise
-    demand tens of gigabytes). Returns requested_pixel_size unchanged if it's
-    already within the cap."""
-    height = max(1, math.ceil(n / width))
+    demand tens of gigabytes). n_pixel_units is the pixel count (see
+    pixel_count_for()), not necessarily the raw byte count. Returns
+    requested_pixel_size unchanged if it's already within the cap."""
+    height = max(1, math.ceil(n_pixel_units / width))
     total = (width * requested_pixel_size) * (height * requested_pixel_size)
     if total <= max_total_pixels:
         return requested_pixel_size
@@ -273,27 +334,35 @@ def safe_pixel_size(n, width, requested_pixel_size, max_total_pixels=MAX_IMAGE_P
 
 
 def build_row_window(data, width, pixel_size, palette, row_start, row_count,
-                     brightness_by_amplitude=False, amplitude_gamma=0.6, normalize_scale=1.0):
-    """Renders only rows [row_start, row_start+row_count) of the byte grid,
+                     brightness_by_amplitude=False, amplitude_gamma=0.6,
+                     normalize_scale=1.0, colorspace="mono"):
+    """Renders only rows [row_start, row_start+row_count) of the pixel grid,
     instead of materializing the entire (potentially huge) image. Rows
     beyond the available data are left black. This is what keeps video
     rendering's memory use (and, via numpy vectorization, render time)
-    bounded by the viewport size rather than the total file size."""
+    bounded by the viewport size rather than the total file size.
+
+    Note: for 'rgb'/'yuv', this re-derives pixels from the full data slice
+    covering the needed rows each call (cheap relative to a full-file pass,
+    since it's bounded by the small row window, same as the 'mono' LUT
+    lookup already was)."""
     row_start = max(0, row_start)
-    lut = palette_lut(palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)
+    bytes_per_pixel = 1 if colorspace == "mono" else 3
 
-    grid = np.zeros(row_count * width, dtype=np.uint8)
-    start_idx = row_start * width
-    end_idx = min(len(data), start_idx + row_count * width)
-    if start_idx < end_idx:
-        chunk = np.frombuffer(data[start_idx:end_idx], dtype=np.uint8)
-        grid[:len(chunk)] = chunk
-    grid = grid.reshape(row_count, width)
+    start_byte = row_start * width * bytes_per_pixel
+    end_byte = min(len(data), start_byte + row_count * width * bytes_per_pixel)
+    chunk = data[start_byte:end_byte] if start_byte < end_byte else b""
 
-    rgb = lut[grid]
+    pixels = bytes_to_pixels(chunk, colorspace, palette, brightness_by_amplitude,
+                              amplitude_gamma, normalize_scale) if chunk else np.zeros((0, 3), dtype=np.uint8)
+
+    grid = np.zeros((row_count * width, 3), dtype=np.uint8)
+    grid[:pixels.shape[0]] = pixels
+    grid = grid.reshape(row_count, width, 3)
+
     if pixel_size > 1:
-        rgb = rgb.repeat(pixel_size, axis=0).repeat(pixel_size, axis=1)
-    return Image.fromarray(rgb, "RGB")
+        grid = grid.repeat(pixel_size, axis=0).repeat(pixel_size, axis=1)
+    return Image.fromarray(grid, "RGB")
 
 
 ENCODER_CODECS = {
@@ -430,7 +499,8 @@ SCALE_FILTERS = {
 def make_video(data, width, pixel_size, palette, audio_path, out_path,
                fps=30, viewport_height=480, video_width=None, video_height=None,
                encoder="auto", codec_family="h264", scale_filter="nearest",
-               brightness_by_amplitude=False, amplitude_gamma=0.6, normalize_scale=1.0):
+               brightness_by_amplitude=False, amplitude_gamma=0.6, normalize_scale=1.0,
+               colorspace="mono"):
     """Renders an MP4 that scrolls through the byte-image in sync with the
     audio's actual duration. Requires ffmpeg on PATH.
 
@@ -453,9 +523,14 @@ def make_video(data, width, pixel_size, palette, audio_path, out_path,
     appropriate for photographic footage, but will blur/ring at the hard
     block edges this data produces.
 
+    colorspace selects how bytes become pixels: 'mono' (default, 1 byte =
+    1 pixel via palette/brightness/normalize), 'rgb' (3 bytes = 1 pixel,
+    direct R/G/B channels), 'yuv' (3 bytes = 1 pixel, Y/U/V converted to
+    RGB). See bytes_to_pixels().
+
     brightness_by_amplitude / amplitude_gamma / normalize_scale: see
-    palette_lut()."""
-    n = len(data)
+    palette_lut() — only apply when colorspace='mono'."""
+    n = pixel_count_for(len(data), colorspace)
     W = width * pixel_size
     total_rows = max(1, math.ceil(n / width))
     total_height = total_rows * pixel_size
@@ -520,7 +595,8 @@ def make_video(data, width, pixel_size, palette, audio_path, out_path,
             y0 = max(0, min(max_scroll, y_center - vp_h / 2))
             row_start = max(0, int(y0 // pixel_size) - 1)
             window_img = build_row_window(data, width, pixel_size, palette, row_start, rows_per_window,
-                                           brightness_by_amplitude, amplitude_gamma, normalize_scale)
+                                           brightness_by_amplitude, amplitude_gamma, normalize_scale,
+                                           colorspace)
             local_y0 = y0 - row_start * pixel_size
 
             frame = window_img.crop((0, int(local_y0), W, int(local_y0) + vp_h))
@@ -626,6 +702,12 @@ def main():
                               "squashed into a narrow band around silence (often reading as mostly one "
                               "colour, e.g. blue/cyan). Pass this flag to disable it and colour bytes by "
                               "their raw value directly.")
+    parser.add_argument("--colorspace", choices=COLORSPACES, default="mono",
+                         help="How bytes become pixels: mono (default) — 1 byte = 1 pixel, coloured via "
+                              "--palette (plus --brightness-by-amplitude/--no-normalize, which only apply "
+                              "here). rgb — 3 consecutive bytes = 1 pixel's literal R/G/B channels, no "
+                              "palette involved. yuv — 3 consecutive bytes = 1 pixel's Y/U/V, converted to "
+                              "RGB. rgb/yuv use 3x fewer pixels than bytes, so images/video are correspondingly smaller.")
     args = parser.parse_args()
 
     base = os.path.splitext(os.path.basename(args.input))[0]
@@ -636,8 +718,14 @@ def main():
 
     print_field("Input", f"{args.input} ({len(data)} bytes decoded @ {sample_rate}Hz)")
 
+    is_mono = args.colorspace == "mono"
+    if not is_mono and (args.brightness_by_amplitude or not args.no_normalize):
+        print_note(f"--colorspace {args.colorspace} colours pixels directly from raw R/G/B or Y/U/V "
+                   f"channel bytes — --palette, --brightness-by-amplitude, and colour normalization "
+                   f"only apply to --colorspace mono, so they're ignored here.")
+
     normalize_scale = 1.0
-    if not args.no_normalize:
+    if is_mono and not args.no_normalize:
         peak = compute_peak_amplitude(data)
         normalize_scale = normalization_scale(peak)
         if normalize_scale != 1.0:
@@ -647,18 +735,21 @@ def main():
                        f"sitting in a narrow band near one colour. Use --no-normalize to colour by "
                        f"raw byte values instead.")
 
+    output_label = args.palette if is_mono else args.colorspace
+    n_pixels = pixel_count_for(len(data), args.colorspace)
+
     if not args.no_image:
-        image_path = os.path.join(args.outdir, f"{base}_{args.palette}.png")
-        image_pixel_size = safe_pixel_size(len(data), args.width, args.pixel_size, args.max_image_pixels)
+        image_path = os.path.join(args.outdir, f"{base}_{output_label}.png")
+        image_pixel_size = safe_pixel_size(n_pixels, args.width, args.pixel_size, args.max_image_pixels)
         if image_pixel_size != args.pixel_size:
             print_note(f"reduced pixel-size from {args.pixel_size} to {image_pixel_size} for the "
-                       f"saved PNG ({len(data)} bytes would otherwise need an enormous image); "
+                       f"saved PNG ({n_pixels} pixels would otherwise need an enormous image); "
                        f"video rendering is unaffected and uses --pixel-size {args.pixel_size} directly. "
                        f"Raise --max-image-pixels (or pass --no-image to skip the PNG) if you have "
                        f"the RAM for the full resolution.")
         build_full_image(data, args.width, image_pixel_size, args.palette,
                           args.brightness_by_amplitude, args.amplitude_gamma,
-                          normalize_scale).save(image_path)
+                          normalize_scale, args.colorspace).save(image_path)
         print_field("Image", image_path)
 
     if args.save_bytes:
@@ -672,7 +763,7 @@ def main():
         wav_path = os.path.join(args.outdir, f"{base}_audio.wav")
         write_wav(data, sample_rate, wav_path)
 
-        video_path = os.path.join(args.outdir, f"{base}_{args.palette}.mp4")
+        video_path = os.path.join(args.outdir, f"{base}_{output_label}.mp4")
         make_video(data, args.width, args.pixel_size, args.palette,
                    wav_path, video_path, fps=args.fps,
                    viewport_height=args.viewport_height,
@@ -681,7 +772,8 @@ def main():
                    scale_filter=args.scale_filter,
                    brightness_by_amplitude=args.brightness_by_amplitude,
                    amplitude_gamma=args.amplitude_gamma,
-                   normalize_scale=normalize_scale)
+                   normalize_scale=normalize_scale,
+                   colorspace=args.colorspace)
         print_field("Video", video_path)
 
 

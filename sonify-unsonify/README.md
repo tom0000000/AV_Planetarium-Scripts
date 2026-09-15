@@ -46,6 +46,9 @@ python3 unsonify.py somefile_raw.wav
   mapping to the audio file's actual peak amplitude by default, so quiet
   recordings still use the full colour range instead of clustering around
   one hue
+- **Selectable colour space** — `unsonify.py --colorspace {mono,rgb,yuv}`
+  decodes bytes as a palette-mapped single channel (default), direct RGB
+  triplets, or YUV (BT.601) triplets
 - Clean Ctrl+C handling — aborts kill ffmpeg and remove incomplete output
   rather than leaving a corrupt file behind
 
