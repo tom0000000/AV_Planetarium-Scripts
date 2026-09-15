@@ -153,6 +153,22 @@ def read_bytes(path):
         return f.read()
 
 
+def unique_path(path):
+    """Returns `path` unchanged if nothing exists there yet; otherwise
+    appends _1, _2, ... before the extension until an unused path is found.
+    Keeps repeated runs against the same input/outdir from silently
+    overwriting a previous run's output."""
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    n = 1
+    while True:
+        candidate = f"{root}_{n}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
 def make_raw_audio(data, sample_rate, out_path):
     """Bytes are used directly as unsigned 8-bit PCM samples."""
     with wave.open(out_path, "wb") as wf:
@@ -637,9 +653,9 @@ def main():
     base = os.path.splitext(os.path.basename(args.input))[0]
     os.makedirs(args.outdir, exist_ok=True)
 
-    audio_path = os.path.join(args.outdir, f"{base}_{args.mode}.wav")
-    image_path = os.path.join(args.outdir, f"{base}_{args.palette}.png")
-    video_path = os.path.join(args.outdir, f"{base}_{args.mode}_{args.palette}.mp4")
+    audio_path = unique_path(os.path.join(args.outdir, f"{base}_{args.mode}.wav"))
+    image_path = unique_path(os.path.join(args.outdir, f"{base}_{args.palette}.png"))
+    video_path = unique_path(os.path.join(args.outdir, f"{base}_{args.mode}_{args.palette}.mp4"))
 
     if args.mode == "raw":
         make_raw_audio(data, args.sample_rate, audio_path)

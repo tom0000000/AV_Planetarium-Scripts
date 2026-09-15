@@ -3,6 +3,19 @@
 All notable changes to `sonify.py` / `unsonify.py`, in the order they were
 developed. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0]
+
+### Added: auto-numbered output filenames
+- Both scripts now check each auto-generated output path (audio/image/video
+  in `sonify.py`; image/WAV/video in `unsonify.py`) before writing, and
+  insert a `_1`, `_2`, ... suffix before the extension if a file already
+  exists there — e.g. `song_rainbow.png`, then `song_rainbow_1.png` on the
+  next run against the same input/`--outdir`. Prevents a repeated or
+  parameter-varying run from silently clobbering a previous run's output.
+- New `unique_path()` helper in both scripts.
+- Does not apply to explicitly-named output paths (`unsonify.py`'s
+  `--save-bytes`) — those are still written exactly as given.
+
 ## [1.1.0]
 
 ### Added: colour spaces in unsonify.py

@@ -95,6 +95,11 @@ python3 sonify.py input_file --video-width 6894 --video-height 1920 --scale-filt
 - `<name>_<palette>.png` — the full colour byte-map image (unless `--no-image`)
 - `<name>_<mode>_<palette>.mp4` — the scrolling video (unless `--no-video`)
 
+If a file already exists at one of these paths (e.g. from a previous run
+against the same input/`--outdir`), a numeric suffix is inserted before the
+extension — `test_raw.wav`, then `test_raw_1.wav`, `test_raw_2.wav`, etc. —
+so repeated runs never silently overwrite prior output. See `unique_path()`.
+
 ### Function reference
 
 | Function | Purpose |
@@ -102,6 +107,7 @@ python3 sonify.py input_file --video-width 6894 --video-height 1920 --scale-filt
 | `midi_to_freq(note)` | Converts a MIDI note number to frequency (Hz) via 12-tone equal temperament, A440 |
 | `snap_to_scale(note, key, scale_mode)` | Moves a MIDI note to the nearest pitch in a given key/scale, preserving register |
 | `read_bytes(path)` | Reads a file's raw bytes |
+| `unique_path(path)` | Returns `path` unchanged if free, otherwise inserts a `_1`, `_2`, ... suffix before the extension until an unused path is found — prevents repeated runs from overwriting prior output |
 | `make_raw_audio(data, sample_rate, out_path)` | Writes bytes directly as 8-bit unsigned PCM (`--mode raw`) |
 | `make_tone_audio(data, sample_rate, out_path, ...)` | Renders each byte as a tone per `--note-map` (`--mode tone`) |
 | `byte_to_color(b, palette)` | Maps a single byte to an RGB colour under the given palette |
@@ -187,7 +193,14 @@ python3 unsonify.py song.mp3 --colorspace yuv --width 96
 - `<name>_<palette-or-colorspace>.png` — the byte-map image (unless `--no-image`); named by `--palette` under `mono`, by `--colorspace` under `rgb`/`yuv`
 - `<name>_audio.wav` — the WAV rebuilt from extracted bytes (only if generating video)
 - `<name>_<palette-or-colorspace>.mp4` — the scrolling video (unless `--no-video`)
-- the file at `--save-bytes`, if given — raw extracted bytes
+- the file at `--save-bytes`, if given — raw extracted bytes (written as given, not auto-numbered — see below)
+
+If a file already exists at one of the auto-generated paths above (e.g. from
+a previous run against the same input/`--outdir`), a numeric suffix is
+inserted before the extension — `song_rainbow.png`, then
+`song_rainbow_1.png`, `song_rainbow_2.png`, etc. — so repeated runs never
+silently overwrite prior output. See `unique_path()`. This does **not**
+apply to `--save-bytes`, since that path is explicitly chosen by the caller.
 
 ### Function reference
 
@@ -196,6 +209,7 @@ python3 unsonify.py song.mp3 --colorspace yuv --width 96
 | `get_sample_rate(audio_path)` | Reads the input's native sample rate — via Python's `wave` module for `.wav` (no external tool needed), via `ffprobe` for other formats |
 | `decode_to_bytes(audio_path, sample_rate)` | Uses ffmpeg to decode any audio file to raw 8-bit unsigned mono PCM bytes at the given rate |
 | `write_wav(data, sample_rate, out_path)` | Writes bytes as an 8-bit unsigned mono WAV |
+| `unique_path(path)` | Same as in `sonify.py` — prevents repeated runs from overwriting prior auto-named output |
 | `wav_duration_seconds(wav_path)` | Reads a WAV's exact duration |
 | `byte_to_color(b, palette)` | Same as in `sonify.py` — maps a byte to an RGB colour, used by the `mono` colour space |
 | `bytes_to_pixels(data, colorspace, palette, brightness_by_amplitude, amplitude_gamma, normalize_scale)` | Turns raw bytes into an `(N, 3)` RGB pixel array under the selected colour space — see [Colour spaces](#colour-spaces) |

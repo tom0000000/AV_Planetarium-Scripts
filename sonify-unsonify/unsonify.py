@@ -161,6 +161,22 @@ def write_wav(data, sample_rate, out_path):
         wf.writeframes(data)
 
 
+def unique_path(path):
+    """Returns `path` unchanged if nothing exists there yet; otherwise
+    appends _1, _2, ... before the extension until an unused path is found.
+    Keeps repeated runs against the same input/outdir from silently
+    overwriting a previous run's output."""
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    n = 1
+    while True:
+        candidate = f"{root}_{n}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
 def wav_duration_seconds(wav_path):
     with wave.open(wav_path, "rb") as wf:
         return wf.getnframes() / float(wf.getframerate())
@@ -739,7 +755,7 @@ def main():
     n_pixels = pixel_count_for(len(data), args.colorspace)
 
     if not args.no_image:
-        image_path = os.path.join(args.outdir, f"{base}_{output_label}.png")
+        image_path = unique_path(os.path.join(args.outdir, f"{base}_{output_label}.png"))
         image_pixel_size = safe_pixel_size(n_pixels, args.width, args.pixel_size, args.max_image_pixels)
         if image_pixel_size != args.pixel_size:
             print_note(f"reduced pixel-size from {args.pixel_size} to {image_pixel_size} for the "
@@ -760,10 +776,10 @@ def main():
     if not args.no_video:
         # rebuild a clean WAV from the extracted bytes so the audio track and
         # the image are guaranteed to be built from the exact same byte data
-        wav_path = os.path.join(args.outdir, f"{base}_audio.wav")
+        wav_path = unique_path(os.path.join(args.outdir, f"{base}_audio.wav"))
         write_wav(data, sample_rate, wav_path)
 
-        video_path = os.path.join(args.outdir, f"{base}_{output_label}.mp4")
+        video_path = unique_path(os.path.join(args.outdir, f"{base}_{output_label}.mp4"))
         make_video(data, args.width, args.pixel_size, args.palette,
                    wav_path, video_path, fps=args.fps,
                    viewport_height=args.viewport_height,
