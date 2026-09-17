@@ -1,0 +1,26 @@
+# geometry_demo.txt — a tour of compose.py's geometric pattern commands.
+#
+#   python3 compose.py examples/scores/geometry_demo.txt pattern.bin --preview pattern.png
+#   python3 sonify.py pattern.bin --width 64 --mode raw
+#
+# Palette defaults to rainbow (compose.py's default, matches sonify.py's).
+# Colour names here are hue names, safe under rainbow/rainbow-bw but not
+# gray — see MANUAL.md's "Values and colour names" section.
+
+WIDTH 64
+SEED 42
+
+# a reusable 2-colour stripe motif, called twice below
+DEFINE beat
+  STRIPES h 4 red,blue 8
+END
+
+REPEAT 2
+  CALL beat
+END
+
+CHECKER 8 128,60 32
+GRADIENT radial cyan magenta 64
+RINGS 6 red,orange,yellow,green 64
+DIAGONAL fwd 8 blue,cyan,yellow 32
+NOISE 16 40-220

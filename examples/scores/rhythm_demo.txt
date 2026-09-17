@@ -1,0 +1,20 @@
+# rhythm_demo.txt — a tour of compose.py's metronomic SEQ sequencing,
+# REPEAT loops, and DEFINE/CALL reusable motifs.
+#
+#   python3 compose.py examples/scores/rhythm_demo.txt melody.bin --preview melody.png
+#   python3 sonify.py melody.bin --mode tone --note-map midi --ms-per-byte 150
+#
+# No WIDTH needed here — SEQ is a flat 1D sequence, it scrolls across
+# whatever --width you render it at.
+
+# a 4-beat motif: colour rises through the spectrum, then a rest
+DEFINE riser
+  SEQ red:3 orange:3 yellow:3 green:3 cyan:3 blue:3 violet:3 REST:4
+END
+
+REPEAT 3
+  CALL riser
+END
+
+# a short coda (250 demonstrates a raw byte value works too, not just names)
+SEQ SILENCE:4 250:2 SILENCE:4

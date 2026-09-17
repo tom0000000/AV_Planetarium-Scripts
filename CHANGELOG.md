@@ -3,6 +3,41 @@
 All notable changes to `sonify.py` / `unsonify.py`, in the order they were
 developed. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.5.0]
+
+### Added: compose.py, a plain-text pattern composer
+- New companion script that writes a raw byte file for `sonify.py` from a
+  plain-text score, instead of relying on incidental data or hand-crafted
+  bytes. Two kinds of content, freely mixable in one score:
+  - **Metronomic sequencing** — `SEQ <value>[:<ticks>] ...` plays values
+    one after another, each held for a chosen number of bytes, the same
+    idea as `notes_to_bin.py`'s `NOTE:TICKS` format generalized beyond
+    MIDI notes to arbitrary byte/colour values.
+  - **Geometric patterns** — `STRIPES`, `CHECKER`, `GRADIENT` (linear or
+    radial), `RINGS`, and `DIAGONAL`, all width-aware so they tile
+    correctly once reshaped into an image, plus seeded `NOISE`.
+  - `REPEAT n ... END` loops and `DEFINE name ... END` / `CALL name`
+    reusable named motifs, with recursive `CALL` rejected outright rather
+    than hanging.
+- Values accept a raw byte 0-255, `REST`/`SILENCE`, or a colour name
+  (`red`, `cyan`, `black`, ... ) resolved via `resolve_value()` to the
+  byte that produces roughly that colour **under the chosen `--palette`**
+  — deliberately palette-aware rather than a fixed table: `rainbow` never
+  desaturates (byte 0 and 255 are both fully-saturated red), so `white`/
+  `gray` are refused there with an explanatory error instead of silently
+  picking the nearest available colour, and the hued names are refused
+  under `--palette gray` for the same reason in reverse.
+- `--preview PATH` renders a PNG via `sonify.make_image()`, imported
+  directly from `sonify.py`, so the preview uses the exact same
+  palette/image logic `sonify.py` itself would.
+- Errors (unclosed `REPEAT`/`DEFINE`, undefined/recursive `CALL`,
+  unknown commands, out-of-range/unrepresentable values, a geometric
+  command before `WIDTH` is set) are reported with the offending line
+  number, no raw traceback.
+- Two example scores added under `examples/scores/` (`rhythm_demo.txt`,
+  `geometry_demo.txt`), referenced from the README quick start.
+- Documented in MANUAL.md (new "3. compose.py" section) and README.md.
+
 ## [1.4.0]
 
 ### Added: --color-gamma, to fix output clustering in a single hue

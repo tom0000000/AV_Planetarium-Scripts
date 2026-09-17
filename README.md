@@ -10,6 +10,11 @@ Turn any file's raw bytes into sound and colour, and back again.
 - **`notes_to_bin.py`** — companion tool: write a plain-text musical score,
   get back a raw byte file you can feed into `sonify.py --mode tone` to
   compose an actual melody rather than relying on incidental data.
+- **`compose.py`** — companion tool: write a plain-text score describing
+  metronomic colour/tone sequences and/or geometric patterns (stripes,
+  checkerboard, gradients, rings, diagonals), get back a raw byte file for
+  `sonify.py` — for deliberately composing what a colour byte-map looks
+  like, not just what it sounds like.
 
 Full documentation, every flag, every function, and the concepts behind the
 colour/audio mappings: see **[MANUAL.md](MANUAL.md)**.
@@ -22,6 +27,7 @@ pip install -r requirements.txt
 
 python3 sonify.py somefile.bin
 python3 unsonify.py somefile_raw.wav
+python3 compose.py examples/scores/geometry_demo.txt pattern.bin --preview pattern.png
 ```
 
 ## Requirements
@@ -52,6 +58,11 @@ python3 unsonify.py somefile_raw.wav
 - **Colour spread control** — `unsonify.py --color-gamma` spreads output
   across more of the colour wheel for mostly-quiet audio, where linear
   peak normalization alone still clusters in a single hue
+- **Pattern composer** — `compose.py`'s plain-text scores build metronomic
+  colour/tone sequences and geometric patterns (stripes, checkerboard,
+  gradients, rings, diagonals, seeded noise), with `REPEAT` loops and
+  `DEFINE`/`CALL` reusable motifs, plus a `--preview` PNG that reuses
+  `sonify.py`'s own palette logic
 - Clean Ctrl+C handling — aborts kill ffmpeg and remove incomplete output
   rather than leaving a corrupt file behind
 

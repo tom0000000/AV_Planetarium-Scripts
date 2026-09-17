@@ -1,16 +1,22 @@
 # sonify.py / unsonify.py — Manual
 
-Two companion tools for turning data into sound-and-colour, and back again.
+Companion tools for turning data into sound-and-colour, and back again.
 
 - **`sonify.py`** — reads any file's raw bytes → produces audio (WAV), a colour
   byte-map (PNG), and a scrolling video synced to the audio (MP4).
 - **`unsonify.py`** — reads any audio file → decodes it back to raw bytes,
   producing the same colour byte-map (PNG) and scrolling video (MP4), plus
   optionally the raw bytes themselves (BIN).
+- **`compose.py`** — writes a raw byte file *for* `sonify.py` from a
+  plain-text score: metronomic colour/tone sequences and geometric
+  patterns (stripes, checkerboard, gradients, rings, diagonals), instead
+  of relying on incidental data.
 
 They share the same colour-mapping logic, so an image/video from one lines up
-visually with the other. Both require **ffmpeg** on your PATH for video output
-(ffmpeg also provides `ffprobe`, used by `unsonify.py` for non-`.wav` inputs).
+visually with the other. Both `sonify.py`/`unsonify.py` require **ffmpeg** on
+your PATH for video output (ffmpeg also provides `ffprobe`, used by
+`unsonify.py` for non-`.wav` inputs); `compose.py` needs neither ffmpeg nor
+audio input, only Pillow/numpy.
 
 ---
 
@@ -315,6 +321,117 @@ note that they're being ignored rather than silently doing nothing.
 
 ---
 
+## 3. compose.py
+
+### What it does
+
+A plain-text pattern composer that writes a raw byte file (`.bin`) for
+`sonify.py`, instead of you having to hand-craft or find a file whose bytes
+happen to produce something interesting. Two things it can build:
+
+- **Metronomic colour/tone sequences** — `SEQ` plays a list of values one
+  after another, each held for a chosen number of bytes ("ticks"), the same
+  idea as `notes_to_bin.py`'s `NOTE:TICKS` score format but for arbitrary
+  byte/colour values instead of MIDI notes. Under `sonify.py --mode tone
+  --ms-per-byte`, each tick is a literal fixed-duration beat.
+- **Geometric patterns** — `STRIPES`, `CHECKER`, `GRADIENT`, `RINGS`, and
+  `DIAGONAL` generate 2D patterns aware of the row width you'll render
+  with, so they actually tile correctly once `sonify.py` reshapes the
+  bytes into an image — something you can't get from hand-written `SEQ`
+  blocks, which are 1D and scroll across whatever grid they land on.
+
+Both kinds of section can be mixed freely in one score, plus `REPEAT`
+loops, `DEFINE`/`CALL` reusable named motifs, and seeded `NOISE`.
+
+### Usage
+
+```
+python3 compose.py score.txt pattern.bin
+python3 compose.py score.txt pattern.bin --preview pattern.png
+python3 compose.py score.txt pattern.bin --palette rainbow-bw --preview pattern.png
+python3 sonify.py pattern.bin --width 64 --mode raw
+```
+
+### Score format
+
+One command per line; `#` starts a comment; blank lines are ignored.
+
+| Command | Syntax | Effect |
+|---|---|---|
+| `WIDTH` | `WIDTH <n>` | Sets the row width used by every pattern command below it, and by `--preview`. Required before any geometric command (`SEQ` doesn't need it). Should match the `--width` you'll pass to `sonify.py`. |
+| `SEED` | `SEED <n>` | Seeds the RNG used by `NOISE` from this point on, for reproducible output. |
+| `SEQ` | `SEQ <value>[:<ticks>] ...` | Metronomic 1D sequence — each value held for `<ticks>` bytes (default 1). |
+| `STRIPES` | `STRIPES <h\|v> <thickness> <v1,v2,...> <rows>` | Alternating horizontal or vertical bands, cycling through the given values. |
+| `CHECKER` | `CHECKER <size> <v1,v2> <rows>` | Checkerboard of `size`×`size` cells alternating `v1`/`v2`. |
+| `GRADIENT` | `GRADIENT <h\|v\|radial> <start> <end> <rows>` | Smooth interpolation left-to-right, top-to-bottom, or centre-to-edge. |
+| `RINGS` | `RINGS <thickness> <v1,v2,...> <rows>` | Concentric rings from centre, cycling through values every `thickness` pixels of radius. |
+| `DIAGONAL` | `DIAGONAL <fwd\|back> <thickness> <v1,v2,...> <rows>` | Diagonal bands (`fwd` = "/", `back` = "\\"), cycling through values. |
+| `NOISE` | `NOISE <rows> [<low>-<high>]` | Random bytes uniform over `[low,high]` (default `0-255`). |
+| `REPEAT` ... `END` | `REPEAT <n>` ... `END` | Repeats the enclosed lines `n` times. |
+| `DEFINE` ... `END` | `DEFINE <name>` ... `END` | Defines a reusable named block without emitting anything; invoke later with `CALL <name>`. Nesting `REPEAT`/`DEFINE` inside each other is fine; recursive `CALL` is rejected with a clear error rather than hanging. |
+| `CALL` | `CALL <name>` | Executes a previously `DEFINE`d block. |
+
+`STRIPES`/`CHECKER`/`GRADIENT`/`RINGS`/`DIAGONAL`/`NOISE` all consume
+`rows` **rows of the current `WIDTH`** — i.e. `rows × width` bytes — and
+append that to the output, so sections concatenate top-to-bottom in the
+final image exactly in the order they appear in the score.
+
+### Values and colour names
+
+Any `<value>` (in `SEQ`, or a pattern's value list/gradient endpoints)
+accepts:
+
+- a raw byte, `0`-`255`;
+- `REST` (255) or `SILENCE`/`R` (128) — see [Palettes](#palettes) for
+  what these render as;
+- a colour name, resolved to the byte that produces roughly that colour
+  under `compose.py`'s `--palette` (default `rainbow`, matching
+  `sonify.py`'s default): `red`, `orange`, `yellow`, `chartreuse`,
+  `green`, `spring`, `cyan`, `azure`, `blue`, `violet`/`purple`,
+  `magenta`, `pink`, `black`, `white`, `gray`/`grey`.
+
+Colour names are **palette-aware, not palette-independent** — this matters
+more than it looks like it should. `rainbow` never desaturates (always
+HSV saturation/value = 1.0), so byte `0` and byte `255` are *both* fully-
+saturated red (hue wraps at 1.0), and no byte produces genuine white or
+grey. Under `--palette rainbow`, `black` resolves to `128` (the only byte
+that renders black, via the silence override below) and `white`/`gray`
+are refused with an explanatory error rather than silently picked as the
+nearest available colour — pick `--palette rainbow-bw` (true reserved
+black/white at `0`/`255`) or `--palette gray` (a real intensity ramp) if
+you need them. The hued names (`red`...`pink`) are refused under
+`--palette gray` for the same reason, the other way round.
+
+Because byte `128` always renders pure black (see
+[Palettes](#palettes)), any `GRADIENT`/`RINGS`/`DIAGONAL` whose
+interpolated range passes through 128 will show a visible black
+patch/ring exactly where it crosses — this is the same universal silence
+override, not a bug in `compose.py`.
+
+### `--preview`
+
+`--preview PATH` renders a PNG via `sonify.make_image()` (imported
+directly from `sonify.py`, run from the same directory) — the exact same
+palette/image logic `sonify.py` itself uses, so the preview matches what
+you'd get running `sonify.py` on the `.bin` output. `--preview-pixel-size`
+(default `8`) and `--preview-width` (default `64`, only used if the score
+never sets `WIDTH`) control it.
+
+### Function reference
+
+| Function | Purpose |
+|---|---|
+| `resolve_value(token, palette)` | Resolves one score token to a byte 0-255 — literal, `rest`/`silence`, or a palette-aware colour name |
+| `parse_value_ticks(tok, palette)` | Splits a `SEQ` token's `value:ticks` syntax |
+| `gen_stripes/gen_checker/gen_gradient/gen_rings/gen_diagonal/gen_noise(...)` | Vectorized numpy generators, each returning a `(rows, width)` uint8 array |
+| `tokenize_lines(text)` | Strips comments/blank lines, keeping line numbers for error messages |
+| `parse_block(lines, i, ...)` | Recursive-descent parser for `REPEAT`/`DEFINE`...`END` blocks |
+| `Context` | Holds `width`, `palette`, the output buffer, defined macros, the call stack (for recursion detection), and the RNG |
+| `run_statement(lineno, content, ctx)` | Dispatches one non-block line to the matching command |
+| `execute(stmts, ctx)` | Walks parsed statements, expanding `REPEAT`/`DEFINE`/`CALL` and running the rest |
+
+---
+
 ## Shared concepts
 
 ### Palettes
@@ -528,6 +645,12 @@ python3 sonify.py melody.bin --mode tone --note-map midi --ms-per-byte 150
 For **arbitrary data** you didn't author note-by-note, use `--note-map scale`
 instead — it snaps every byte to the nearest in-key note, so noisy/incidental
 data still comes out tonal rather than atonal.
+
+`compose.py`'s `SEQ` command (see [compose.py](#3-composepy)) is the same
+`value:ticks` idea generalized beyond MIDI notes to arbitrary byte/colour
+values, and adds `REPEAT`/`DEFINE` loops and motifs on top — reach for
+`notes_to_bin.py` for a MIDI-note melody specifically, `compose.py` for
+colour sequences, geometric patterns, or a mix of both in one score.
 
 ---
 
