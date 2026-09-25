@@ -181,12 +181,21 @@ def make_raw_audio(data, sample_rate, out_path):
 def make_tone_audio(data, sample_rate, out_path,
                      ms_per_byte=15, min_freq=80, max_freq=2000,
                      note_map="linear", key="C", scale_mode="major"):
-    """Each byte becomes a short tone. See module docstring for --note-map modes."""
+    """Each byte becomes a short tone. See module docstring for --note-map modes.
+
+    This is a nested pure-Python loop (one iteration per output sample, not
+    vectorized), so for a large file at typical --ms-per-byte values it can
+    take real wall-clock time -- unlike make_raw_audio, which just writes
+    the input bytes directly. Reports throttled progress the same way
+    make_video() does, rather than blocking silently until done."""
     samples_per_byte = max(1, int(sample_rate * ms_per_byte / 1000))
     frames = bytearray()
     two_pi = 2 * math.pi
+    total = len(data)
+    start_time = time.time()
+    last_print = 0.0
 
-    for b in data:
+    for idx, b in enumerate(data):
         is_rest = note_map != "linear" and b == REST_BYTE
 
         if not is_rest:
@@ -212,6 +221,24 @@ def make_tone_audio(data, sample_rate, out_path,
             sample = int(128 + val * 127)
             sample = max(0, min(255, sample))
             frames.append(sample)
+
+        now = time.time()
+        if total > 0 and (now - last_print >= 0.1 or idx == total - 1):
+            last_print = now
+            elapsed = now - start_time
+            frac = (idx + 1) / total
+            rate = (idx + 1) / elapsed if elapsed > 0 else 0.0
+            remaining = (elapsed / frac - elapsed) if frac > 0 else 0.0
+            sys.stdout.write(
+                f"\r{C.CYAN}synthesizing byte {idx + 1}/{total}{C.RESET} "
+                f"({C.BOLD}{frac * 100:5.1f}%{C.RESET})  "
+                f"elapsed={C.DIM}{format_hms(elapsed)}{C.RESET}  "
+                f"remaining={C.YELLOW}{format_hms(remaining)}{C.RESET}  "
+                f"rate={C.GREEN}{rate:7.0f} B/s{C.RESET}"
+            )
+            sys.stdout.flush()
+    if total > 0:
+        sys.stdout.write("\n")
 
     with wave.open(out_path, "wb") as wf:
         wf.setnchannels(1)

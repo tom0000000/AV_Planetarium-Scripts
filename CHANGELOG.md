@@ -3,6 +3,36 @@
 All notable changes to `sonify.py` / `unsonify.py`, in the order they were
 developed. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.0]
+
+### Added: live progress reporting in compose.py and sonify.py
+- `compose.py`: `STRIPES`/`CHECKER`/`GRADIENT`/`RINGS`/`DIAGONAL`/`NOISE`
+  now generate in bounded-size row-chunks (`emit_chunked()`, ~20MB/chunk)
+  instead of one numpy call for the whole pattern, with a live,
+  colour-coded progress line (same throttled ~10Hz style as `sonify.py`'s
+  video rendering) updating after each chunk — a single large command no
+  longer jumps straight from 0% to 100%.
+  - The percentage/ETA is exact: a **dry-run** pass (`Context(dry_run=True)`)
+    walks the whole parsed score first — validating every value/argument
+    and following `WIDTH`/`REPEAT`/`DEFINE`/`CALL` exactly as the real
+    pass will, so bad scores still fail fast before any progress output —
+    tallying `total_bytes` without materializing any grid, which becomes
+    the real pass's percentage denominator.
+  - The pattern generators now take `row_offset`/`chunk_rows` (and, for
+    `GRADIENT v`/`radial` and `RINGS`, `total_rows` separately, since
+    their centre/interpolation range depends on the full extent) instead
+    of always generating from row 0, so chunking doesn't break band
+    continuity or ring/gradient centring.
+- `sonify.py`: `make_tone_audio()` — a nested pure-Python loop, not
+  vectorized, so a large file at typical `--ms-per-byte` values can take
+  real wall-clock time — now reports the same throttled progress line
+  `make_video()` already did, instead of blocking silently. Verified: a
+  6000-byte file at `--ms-per-byte 40` took ~8.5s and previously gave zero
+  feedback for the whole run. `make_raw_audio()` is unaffected (it just
+  writes the input bytes directly, no synthesis loop).
+- Documented in MANUAL.md (new compose.py "Progress" section; updated
+  function references and "Colour-coded output").
+
 ## [1.5.0]
 
 ### Added: compose.py, a plain-text pattern composer

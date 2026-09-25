@@ -87,11 +87,13 @@ import argparse
 import math
 import os
 import sys
+import time
 
 import numpy as np
 
 REST_BYTE = 255      # matches sonify.py's tone-mode rest marker (note_map midi/scale)
 SILENCE_BYTE = 128   # matches sonify.py/unsonify.py's audio-silence / black-pixel byte
+CHUNK_BYTES_TARGET = 20_000_000  # row-chunk size cap for progress reporting, ~20MB/chunk
 
 
 def _color_enabled():
@@ -109,8 +111,10 @@ _COLOR = _color_enabled()
 class C:
     RESET = "\033[0m" if _COLOR else ""
     BOLD = "\033[1m" if _COLOR else ""
+    DIM = "\033[2m" if _COLOR else ""
     RED = "\033[31m" if _COLOR else ""
     GREEN = "\033[32m" if _COLOR else ""
+    YELLOW = "\033[33m" if _COLOR else ""
     CYAN = "\033[36m" if _COLOR else ""
 
 
@@ -124,6 +128,37 @@ def print_note(msg):
 
 def print_error(msg):
     print(f"{C.RED}{C.BOLD}Error: {msg}{C.RESET}", file=sys.stderr)
+
+
+def format_hms(seconds):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def report_progress(ctx, force=False):
+    """Prints a throttled, single-line progress update (elapsed/remaining/
+    rate), the same style as unsonify.py's video-render progress line.
+    No-op if the dry-run pass found no measurable work (ctx.total_bytes)."""
+    if ctx.total_bytes <= 0:
+        return
+    now = time.time()
+    if not force and now - ctx.last_print < 0.1:
+        return
+    ctx.last_print = now
+    frac = min(1.0, ctx.bytes_done / ctx.total_bytes)
+    elapsed = now - ctx.start_time
+    rate = ctx.bytes_done / elapsed if elapsed > 0 else 0.0
+    remaining = (elapsed / frac - elapsed) if frac > 0 else 0.0
+    sys.stdout.write(
+        f"\r{C.CYAN}composing{C.RESET} "
+        f"({C.BOLD}{frac * 100:5.1f}%{C.RESET})  "
+        f"elapsed={C.DIM}{format_hms(elapsed)}{C.RESET}  "
+        f"remaining={C.YELLOW}{format_hms(remaining)}{C.RESET}  "
+        f"rate={C.GREEN}{rate / 1e6:6.1f} MB/s{C.RESET}"
+    )
+    sys.stdout.flush()
 
 
 class ScoreError(Exception):
@@ -225,36 +260,50 @@ def parse_value_ticks(tok, palette):
     return resolve_value(val_tok, palette), ticks
 
 
-# ---- geometric pattern generators (numpy, row-major, return uint8 (rows, width)) --
+# ---- geometric pattern generators -------------------------------------------
+#
+# Each takes row_offset/chunk_rows (the [row_offset, row_offset+chunk_rows)
+# slice to generate right now) rather than always generating from row 0, so
+# emit_chunked() below can generate a large pattern in bounded-size pieces
+# for live progress reporting -- the same windowed-rendering idea as
+# unsonify.py's build_row_window(), applied here for the same reason: a
+# single huge NOISE/GRADIENT/etc. shouldn't block silently until entirely
+# done. Patterns centred/interpolated over the whole grid (GRADIENT v/radial,
+# RINGS) additionally take total_rows, since their centre or interpolation
+# range depends on the *full* extent, not just the current chunk.
+# All return a (chunk_rows, width) uint8 array.
 
-def gen_stripes(width, rows, orientation, thickness, values):
+def gen_stripes(width, row_offset, chunk_rows, orientation, thickness, values):
     values = np.array(values, dtype=np.uint8)
     if orientation in ("h", "horizontal"):
-        row_vals = values[(np.arange(rows) // thickness) % len(values)]
+        rows_idx = np.arange(row_offset, row_offset + chunk_rows)
+        row_vals = values[(rows_idx // thickness) % len(values)]
         return np.repeat(row_vals[:, None], width, axis=1)
     if orientation in ("v", "vertical"):
         col_vals = values[(np.arange(width) // thickness) % len(values)]
-        return np.tile(col_vals[None, :], (rows, 1))
+        return np.tile(col_vals[None, :], (chunk_rows, 1))
     raise ValueError(f"STRIPES orientation must be h/horizontal or v/vertical, got {orientation!r}")
 
 
-def gen_checker(width, rows, size, v1, v2):
-    row_band = (np.arange(rows) // size) % 2
+def gen_checker(width, row_offset, chunk_rows, size, v1, v2):
+    rows_idx = np.arange(row_offset, row_offset + chunk_rows)
+    row_band = (rows_idx // size) % 2
     col_band = (np.arange(width) // size) % 2
     cell = (row_band[:, None] + col_band[None, :]) % 2
     return np.where(cell == 0, v1, v2).astype(np.uint8)
 
 
-def gen_gradient(width, rows, orientation, start, end):
+def gen_gradient(width, row_offset, chunk_rows, total_rows, orientation, start, end):
     if orientation == "h":
         row = np.linspace(start, end, width)
-        grid = np.tile(row, (rows, 1))
+        grid = np.tile(row, (chunk_rows, 1))
     elif orientation == "v":
-        col = np.linspace(start, end, rows)
+        full_col = np.linspace(start, end, total_rows)
+        col = full_col[row_offset:row_offset + chunk_rows]
         grid = np.tile(col[:, None], (1, width))
     elif orientation == "radial":
-        cy, cx = (rows - 1) / 2.0, (width - 1) / 2.0
-        yy, xx = np.mgrid[0:rows, 0:width]
+        cy, cx = (total_rows - 1) / 2.0, (width - 1) / 2.0
+        yy, xx = np.mgrid[row_offset:row_offset + chunk_rows, 0:width]
         dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
         max_dist = math.hypot(cx, cy) or 1.0
         norm = np.clip(dist / max_dist, 0, 1)
@@ -264,25 +313,47 @@ def gen_gradient(width, rows, orientation, start, end):
     return np.clip(np.round(grid), 0, 255).astype(np.uint8)
 
 
-def gen_rings(width, rows, thickness, values):
+def gen_rings(width, row_offset, chunk_rows, total_rows, thickness, values):
     values = np.array(values, dtype=np.uint8)
-    cy, cx = (rows - 1) / 2.0, (width - 1) / 2.0
-    yy, xx = np.mgrid[0:rows, 0:width]
+    cy, cx = (total_rows - 1) / 2.0, (width - 1) / 2.0
+    yy, xx = np.mgrid[row_offset:row_offset + chunk_rows, 0:width]
     dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
     ring_idx = (dist // thickness).astype(int)
     return values[ring_idx % len(values)]
 
 
-def gen_diagonal(width, rows, thickness, values, direction):
+def gen_diagonal(width, row_offset, chunk_rows, thickness, values, direction):
     values = np.array(values, dtype=np.uint8)
-    yy, xx = np.mgrid[0:rows, 0:width]
+    yy, xx = np.mgrid[row_offset:row_offset + chunk_rows, 0:width]
     diag = (xx + yy) if direction == "back" else (xx - yy)
     band_idx = (diag // thickness).astype(int)
     return values[band_idx % len(values)]
 
 
-def gen_noise(width, rows, low, high, rng):
-    return rng.integers(low, high + 1, size=(rows, width), dtype=np.int64).astype(np.uint8)
+def gen_noise(width, chunk_rows, low, high, rng):
+    return rng.integers(low, high + 1, size=(chunk_rows, width), dtype=np.int64).astype(np.uint8)
+
+
+def chunk_size_rows(width, total_rows):
+    rows_per_chunk = max(1, CHUNK_BYTES_TARGET // max(1, width))
+    return min(total_rows, rows_per_chunk)
+
+
+def emit_chunked(ctx, total_rows, make_chunk):
+    """Generates total_rows rows in bounded-size pieces via make_chunk(row_offset,
+    chunk_rows), appending each to ctx.output and reporting progress after
+    each -- rather than materializing and appending the whole pattern in one
+    shot, which would make the progress bar jump straight from 0% to 100%
+    for one big command."""
+    row_offset = 0
+    step = chunk_size_rows(ctx.width, total_rows)
+    while row_offset < total_rows:
+        chunk_rows = min(step, total_rows - row_offset)
+        grid = make_chunk(row_offset, chunk_rows)
+        ctx.output.extend(grid.tobytes())
+        ctx.bytes_done += chunk_rows * ctx.width
+        report_progress(ctx)
+        row_offset += chunk_rows
 
 
 # ---- score parsing (line-based, REPEAT/DEFINE...END blocks, '#' comments) --
@@ -319,13 +390,23 @@ def parse_block(lines, i, top=False, open_lineno=None, open_kind=None):
 
 
 class Context:
-    def __init__(self, palette):
+    def __init__(self, palette, dry_run=False):
         self.width = None
         self.palette = palette
         self.output = bytearray()
         self.macros = {}
         self.call_stack = []
         self.rng = np.random.default_rng()
+        # dry_run walks the score identically (so WIDTH/REPEAT/DEFINE/CALL
+        # behave exactly as the real pass will) but skips numpy grid
+        # generation, just tallying total_bytes -- this gives the real pass
+        # an accurate denominator for percent-complete before doing any of
+        # the actual (potentially slow) work.
+        self.dry_run = dry_run
+        self.total_bytes = 0
+        self.bytes_done = 0
+        self.start_time = None
+        self.last_print = 0.0
 
 
 def require_width(ctx, lineno, cmd):
@@ -362,16 +443,24 @@ def run_statement(lineno, content, ctx):
     elif cmd == "SEQ":
         if not args:
             raise ValueError("SEQ needs at least one value")
-        for tok in args:
-            val, ticks = parse_value_ticks(tok, ctx.palette)
+        resolved = [parse_value_ticks(tok, ctx.palette) for tok in args]
+        total_ticks = sum(ticks for _, ticks in resolved)
+        if ctx.dry_run:
+            ctx.total_bytes += total_ticks
+            return
+        for val, ticks in resolved:
             ctx.output.extend(bytes([val]) * ticks)
+        ctx.bytes_done += total_ticks
+        report_progress(ctx)
 
     elif cmd == "STRIPES":
         require_width(ctx, lineno, "STRIPES")
         orientation, thickness, value_list, rows = args[0].lower(), int(args[1]), args[2], int(args[3])
         values = [resolve_value(v, ctx.palette) for v in value_list.split(",")]
-        grid = gen_stripes(ctx.width, rows, orientation, thickness, values)
-        ctx.output.extend(grid.tobytes())
+        if ctx.dry_run:
+            ctx.total_bytes += rows * ctx.width
+            return
+        emit_chunked(ctx, rows, lambda r0, rc: gen_stripes(ctx.width, r0, rc, orientation, thickness, values))
 
     elif cmd == "CHECKER":
         require_width(ctx, lineno, "CHECKER")
@@ -380,22 +469,28 @@ def run_statement(lineno, content, ctx):
         if len(vals) != 2:
             raise ValueError(f"CHECKER needs exactly 2 comma-separated values, got {value_list!r}")
         v1, v2 = (resolve_value(v, ctx.palette) for v in vals)
-        grid = gen_checker(ctx.width, rows, size, v1, v2)
-        ctx.output.extend(grid.tobytes())
+        if ctx.dry_run:
+            ctx.total_bytes += rows * ctx.width
+            return
+        emit_chunked(ctx, rows, lambda r0, rc: gen_checker(ctx.width, r0, rc, size, v1, v2))
 
     elif cmd == "GRADIENT":
         require_width(ctx, lineno, "GRADIENT")
         orientation = args[0].lower()
         start, end, rows = resolve_value(args[1], ctx.palette), resolve_value(args[2], ctx.palette), int(args[3])
-        grid = gen_gradient(ctx.width, rows, orientation, start, end)
-        ctx.output.extend(grid.tobytes())
+        if ctx.dry_run:
+            ctx.total_bytes += rows * ctx.width
+            return
+        emit_chunked(ctx, rows, lambda r0, rc: gen_gradient(ctx.width, r0, rc, rows, orientation, start, end))
 
     elif cmd == "RINGS":
         require_width(ctx, lineno, "RINGS")
         thickness, value_list, rows = int(args[0]), args[1], int(args[2])
         values = [resolve_value(v, ctx.palette) for v in value_list.split(",")]
-        grid = gen_rings(ctx.width, rows, thickness, values)
-        ctx.output.extend(grid.tobytes())
+        if ctx.dry_run:
+            ctx.total_bytes += rows * ctx.width
+            return
+        emit_chunked(ctx, rows, lambda r0, rc: gen_rings(ctx.width, r0, rc, rows, thickness, values))
 
     elif cmd == "DIAGONAL":
         require_width(ctx, lineno, "DIAGONAL")
@@ -403,8 +498,10 @@ def run_statement(lineno, content, ctx):
         if direction not in ("fwd", "back"):
             raise ValueError(f"DIAGONAL direction must be fwd or back, got {args[0]!r}")
         values = [resolve_value(v, ctx.palette) for v in value_list.split(",")]
-        grid = gen_diagonal(ctx.width, rows, thickness, values, direction)
-        ctx.output.extend(grid.tobytes())
+        if ctx.dry_run:
+            ctx.total_bytes += rows * ctx.width
+            return
+        emit_chunked(ctx, rows, lambda r0, rc: gen_diagonal(ctx.width, r0, rc, thickness, values, direction))
 
     elif cmd == "NOISE":
         require_width(ctx, lineno, "NOISE")
@@ -415,8 +512,10 @@ def run_statement(lineno, content, ctx):
             low, high = int(low_tok), int(high_tok)
             if not (0 <= low <= high <= 255):
                 raise ValueError(f"NOISE range must satisfy 0 <= low <= high <= 255, got {args[1]!r}")
-        grid = gen_noise(ctx.width, rows, low, high, ctx.rng)
-        ctx.output.extend(grid.tobytes())
+        if ctx.dry_run:
+            ctx.total_bytes += rows * ctx.width
+            return
+        emit_chunked(ctx, rows, lambda r0, rc: gen_noise(ctx.width, rc, low, high, ctx.rng))
 
     else:
         raise ScoreError(f"line {lineno}: unknown command {cmd!r}")
@@ -483,7 +582,18 @@ def main():
     ctx = Context(args.palette)
     try:
         stmts, _ = parse_block(lines, 0, top=True)
+
+        # dry run: walks the score identically to size the progress bar
+        # (ctx.total_bytes) before doing any of the actual generation work
+        dry_ctx = Context(args.palette, dry_run=True)
+        execute(stmts, dry_ctx)
+
+        ctx.total_bytes = dry_ctx.total_bytes
+        ctx.start_time = time.time()
         execute(stmts, ctx)
+        if ctx.total_bytes > 0:
+            report_progress(ctx, force=True)
+            sys.stdout.write("\n")
     except ScoreError as e:
         print_error(str(e))
         sys.exit(1)

@@ -117,7 +117,7 @@ so repeated runs never silently overwrite prior output. See `unique_path()`.
 | `read_bytes(path)` | Reads a file's raw bytes |
 | `unique_path(path)` | Returns `path` unchanged if free, otherwise inserts a `_1`, `_2`, ... suffix before the extension until an unused path is found — prevents repeated runs from overwriting prior output |
 | `make_raw_audio(data, sample_rate, out_path)` | Writes bytes directly as 8-bit unsigned PCM (`--mode raw`) |
-| `make_tone_audio(data, sample_rate, out_path, ...)` | Renders each byte as a tone per `--note-map` (`--mode tone`) |
+| `make_tone_audio(data, sample_rate, out_path, ...)` | Renders each byte as a tone per `--note-map` (`--mode tone`). A nested pure-Python loop (one iteration per output sample, not vectorized), so for a large file it reports throttled live progress the same way `make_video` does, rather than blocking silently — `make_raw_audio` needs no such thing, it just writes the input bytes directly |
 | `byte_to_color(b, palette)` | Maps a single byte to an RGB colour under the given palette |
 | `palette_lut(palette)` | Precomputes a 256×3 lookup table of `byte_to_color` results, so colouring a whole array of bytes is one numpy fancy-index lookup instead of per-pixel Python calls — see [Memory & performance](#memory--performance) |
 | `build_full_image(data, width, pixel_size, palette)` | Builds the full byte-map image via vectorized numpy (LUT lookup + `repeat` upscale) |
@@ -417,17 +417,46 @@ you'd get running `sonify.py` on the `.bin` output. `--preview-pixel-size`
 (default `8`) and `--preview-width` (default `64`, only used if the score
 never sets `WIDTH`) control it.
 
+### Progress
+
+Every `STRIPES`/`CHECKER`/`GRADIENT`/`RINGS`/`DIAGONAL`/`NOISE` command
+generates its rows in bounded-size chunks (`emit_chunked()`, capped around
+20MB/chunk) rather than materializing the whole pattern in one numpy call,
+and a live progress line (same throttled, colour-coded style as
+`sonify.py`'s video/tone-synthesis progress — see
+[Colour-coded output](#colour-coded-output)) updates after each chunk: a
+score with one big `NOISE` or `GRADIENT` command still shows smooth
+incremental progress instead of jumping straight from 0% to 100%.
+
+The percentage/ETA is exact, not estimated: before generating anything,
+`compose.py` runs the whole parsed score once in a **dry-run** pass — a
+second `Context` with `dry_run=True`, which walks `WIDTH`/`REPEAT`/`DEFINE`/
+`CALL` exactly as the real pass will and validates every value/argument
+(so a bad score still fails fast, before printing a single progress line),
+but skips the numpy grid generation itself, just tallying `total_bytes`.
+That total becomes the real pass's percentage denominator.
+
+For chunking to preserve correctness, not just speed, the pattern
+generators take an explicit `row_offset`/`chunk_rows` (and, for
+`GRADIENT v`/`radial` and `RINGS`, the pattern's `total_rows` separately —
+their centre/interpolation range depends on the *full* extent, not the
+current chunk) rather than always generating from row 0.
+
 ### Function reference
 
 | Function | Purpose |
 |---|---|
 | `resolve_value(token, palette)` | Resolves one score token to a byte 0-255 — literal, `rest`/`silence`, or a palette-aware colour name |
 | `parse_value_ticks(tok, palette)` | Splits a `SEQ` token's `value:ticks` syntax |
-| `gen_stripes/gen_checker/gen_gradient/gen_rings/gen_diagonal/gen_noise(...)` | Vectorized numpy generators, each returning a `(rows, width)` uint8 array |
+| `gen_stripes/gen_checker/gen_gradient/gen_rings/gen_diagonal/gen_noise(...)` | Vectorized numpy generators, each returning a `(chunk_rows, width)` uint8 array for the `[row_offset, row_offset+chunk_rows)` slice — see [Progress](#progress) |
+| `chunk_size_rows(width, total_rows)` | Caps a pattern's row-chunk size around `CHUNK_BYTES_TARGET` (~20MB) — see [Progress](#progress) |
+| `emit_chunked(ctx, total_rows, make_chunk)` | Generates a pattern in row-chunks via `make_chunk(row_offset, chunk_rows)`, appending each and reporting progress — see [Progress](#progress) |
+| `report_progress(ctx, force=False)` | Prints the throttled, colour-coded progress line — see [Progress](#progress) |
+| `format_hms(seconds)` | Formats seconds as `H:MM:SS` for the progress display |
 | `tokenize_lines(text)` | Strips comments/blank lines, keeping line numbers for error messages |
 | `parse_block(lines, i, ...)` | Recursive-descent parser for `REPEAT`/`DEFINE`...`END` blocks |
-| `Context` | Holds `width`, `palette`, the output buffer, defined macros, the call stack (for recursion detection), and the RNG |
-| `run_statement(lineno, content, ctx)` | Dispatches one non-block line to the matching command |
+| `Context` | Holds `width`, `palette`, the output buffer, defined macros, the call stack (for recursion detection), the RNG, and (see [Progress](#progress)) `dry_run`/`total_bytes`/`bytes_done` |
+| `run_statement(lineno, content, ctx)` | Dispatches one non-block line to the matching command; under `ctx.dry_run` a byte-generating command validates its arguments/values then only tallies `ctx.total_bytes`, without generating anything |
 | `execute(stmts, ctx)` | Walks parsed statements, expanding `REPEAT`/`DEFINE`/`CALL` and running the rest |
 
 ---
@@ -572,7 +601,12 @@ helpers:
 | `print_error(msg)` | bold red | Fatal errors (caught at the top level in `if __name__ == "__main__"`, printed, then exit code 1) |
 
 The live progress line also colours its own fields individually: percentage
-(bold), elapsed (dim), remaining (yellow), fps (green).
+(bold), elapsed (dim), remaining (yellow), fps/rate (green). Both
+`sonify.py` (video rendering via `make_video`, tone synthesis via
+`make_tone_audio`) and `compose.py` (pattern generation via
+`emit_chunked`/`report_progress`) use this same throttled (~10Hz),
+carriage-return-driven single-line style, so a run that's actually doing
+work never looks hung.
 
 Colour is applied only when it will actually render correctly:
 - Automatically disabled if stdout isn't a real terminal (e.g. output is
